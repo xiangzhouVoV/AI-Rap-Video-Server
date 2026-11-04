@@ -1,0 +1,8 @@
+# Browser-visible frontend origin; local Next.js proxies /api/auth/* and /api/me.
+BETTER_AUTH_URL=http://localhost:3000
+# Generate locally: openssl rand -base64 32
+BETTER_AUTH_SECRET=
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+# Google Web application authorized redirect URI:
+# http://localhost:3000/api/auth/callback/google

@@ -1,0 +1,34 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ai-rap-video-server",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "routes": [
+    {
+      "pattern": "https://airaptovideo.app/api/auth/*",
+      "zone_name": "airaptovideo.app"
+    },
+    {
+      "pattern": "https://airaptovideo.app/api/me*",
+      "zone_name": "airaptovideo.app"
+    }
+  ],
+  "vars": {
+    "BETTER_AUTH_URL": "https://airaptovideo.app"
+  },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "ai-rap-video-auth",
+    "database_id": "d8aeecdc-1bb7-47c5-b508-2d33e5533079",
+    "migrations_dir": "migrations"
+  }],
+  "images": {
+    "binding": "IMAGES"
+  },
+  "r2_buckets": [{
+    "binding": "MEDIA",
+    "bucket_name": "ai-rap-video-media"
+  }]
+}
