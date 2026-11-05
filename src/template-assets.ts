@@ -11,10 +11,9 @@ function clipKeys(directory: string) {
 }
 const legacyClipKeys = clipKeys(prefix + "/v3");
 const v3ClipKeys = clipKeys(prefix + "/v3/720p");
-export const cruiseClipKeys = { opening: prefix + "/v4/opening.mp4", finale: prefix + "/v4/finale.mp4" };
-export const cruiseAudioKey = prefix + "/v4/reference-audio.m4a";
-export const cruiseTemplateVersion = 4;
+export const cruiseCartoonVersion = 4;
 export const cruiseTrialVersion = 5;
+export const defaultCruiseVersion = cruiseTrialVersion;
 
 export const fixedMediaPath = "/api/template-media/fixed/24k-magic";
 const lifetimeSeconds = 24 * 60 * 60;
@@ -25,7 +24,8 @@ const specifications = {
     aspectRatio: "4:3", cut: 13.7, duration: 26.554, providerSeconds: 15,
   },
   4: {
-    clipKeys: cruiseClipKeys, audioKey: cruiseAudioKey, path: fixedMediaPath + "/v4",
+    clipKeys: { opening: prefix + "/v4/opening.mp4", finale: prefix + "/v4/finale.mp4" },
+    audioKey: prefix + "/v4/reference-audio.m4a", path: fixedMediaPath + "/v4",
     aspectRatio: "16:9", cut: 302 / 30, duration: 605 / 30, providerSeconds: 11,
   },
   5: {
@@ -40,7 +40,7 @@ export function cruiseSpec(version: number) {
   return specifications[version];
 }
 
-export type Clip = keyof typeof cruiseClipKeys;
+export type Clip = keyof ReturnType<typeof clipKeys>;
 
 export const cruisePauseMessage = "Generation is paused for this template pending approval. You can check again later.";
 
@@ -55,13 +55,13 @@ export function cruisePauseReason(env: AppEnv, version: number) {
     : cruisePauseMessage;
 }
 
-export function isCruiseClipPaused(env: AppEnv, scene: Clip, version = cruiseTemplateVersion) {
+export function isCruiseClipPaused(env: AppEnv, scene: Clip, version = defaultCruiseVersion) {
   // The retired opening was rejected by the provider. Keep it on hold even if the active hold changes.
   if (version === 3 && scene === "opening") return true;
   return isCruiseCastPaused(env, version) || env.CRUISE_PAUSED_CLIP_KEY === cruiseSpec(version).clipKeys[scene];
 }
 
-export function currentCruiseClipPath(scene: Clip, version = cruiseTemplateVersion) {
+export function currentCruiseClipPath(scene: Clip, version = defaultCruiseVersion) {
   return `${cruiseSpec(version).path}/${scene}`;
 }
 
@@ -75,7 +75,7 @@ function signatureInput(path: string, expires: string) {
   return encoder.encode(`provider-read\n${path}\n${expires}`);
 }
 
-export async function resolveCruiseAssets(env: AppEnv, version = cruiseTemplateVersion): Promise<{ opening: string; finale: string }> {
+export async function resolveCruiseAssets(env: AppEnv, version = defaultCruiseVersion): Promise<{ opening: string; finale: string }> {
   try {
     const origin = publicOrigin(env);
     const { clipKeys, audioKey } = cruiseSpec(version);

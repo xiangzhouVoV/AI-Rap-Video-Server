@@ -46,7 +46,7 @@ it("keeps policy-rejected openings on hold across signed URL changes and isolate
     MEDIA: { head: async () => ({ size: 1 }) },
   } as unknown as AppEnv;
   const partBody = (path: string) => JSON.stringify({input: {reference_video: ["https://app.example.test" + path + "?expires=old&signature=old"]}});
-  const opening = { scene: "opening", body: partBody(currentCruiseClipPath("opening")), status: "failed", attempt: 2,
+  const opening = { scene: "opening", body: partBody(currentCruiseClipPath("opening", 4)), status: "failed", attempt: 2,
     taskId: "attempt-two", previous: [{ consumed_credits: 0 }], credits: { consumed_credits: 0 }, failure: "template_video_policy" };
   const finale = { scene: "finale", status: "succeeded", result: "saved/finale.mp4", credits: { consumed_credits: 448 }, previous: [], attempt: 1 };
   const plan = { parts: [opening, finale], resolution: "480p", portraits: { photoUrl: "https://assets.example.test/a.jpg",

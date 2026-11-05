@@ -5,7 +5,7 @@ import { ProviderError, providerRequest, type ProviderTask } from "./seeapi";
 import { cruisePromptV2, cruisePromptV1 } from "./templates";
 
 import { createCruisePlan, advanceCruiseJob, hasRetried, prepareCruiseRetry, cruiseRetryOptions } from "./cruise-jobs";
-import { cruiseTemplateVersion, cruiseTrialVersion } from "./template-assets";
+import { cruiseCartoonVersion, cruiseTrialVersion, defaultCruiseVersion } from "./template-assets";
 import { storeProviderVideo } from "./result-video";
 
 type Job = {
@@ -30,7 +30,7 @@ generationRoutes.post("/", async (c) => {
   }
   const userId = c.get("userId");
   const existing = await findJob(c.env, userId, body.requestId);
-  const expectedVersion = existing?.template_version ?? (body.templateVersion === cruiseTrialVersion ? cruiseTrialVersion : cruiseTemplateVersion);
+  const expectedVersion = existing?.template_version ?? (body.templateVersion === cruiseCartoonVersion ? cruiseCartoonVersion : defaultCruiseVersion);
   if (expectedVersion >= 4 ? body.templateVersion !== expectedVersion
     : body.templateVersion != null && body.templateVersion !== expectedVersion) {
     return c.json({ error: { code: "TEMPLATE_UPDATED", message: "This template has changed. Reload the page before starting a video." } }, 409);

@@ -9,7 +9,7 @@ import { createAuth, type AuthEnv } from "../src/auth";
 import { app } from "../src/index";
 import { reconcileCruiseJobs } from "../src/generations";
 import type { AppEnv } from "../src/env";
-import { cruiseAudioKey, cruiseClipKeys, cruiseSpec, resolveCruiseAssets } from "../src/template-assets";
+import { cruiseSpec, resolveCruiseAssets } from "../src/template-assets";
 
 const origin = "https://auth.example.test";
 let env: AuthEnv;
@@ -160,7 +160,8 @@ describe("authentication against local D1", { concurrency: false }, () => {
       return realFetch(input, init);
     });
 
-    const config = await (await request("/api/templates/24k-magic", { headers }, bindings)).json() as { template: object };
+    const { clipKeys: cruiseClipKeys, audioKey: cruiseAudioKey } = cruiseSpec(4);
+    const config = await (await request("/api/templates/24k-magic?version=4", { headers }, bindings)).json() as { template: object };
     assert.deepEqual(config.template, { id: "24k-magic", name: "24K Magic Cruise Dance", version: 4,
       duration: 605 / 30, aspectRatio: "16:9", resolution: "720p" });
     assert.equal((await submit({ ...body, templateVersion: undefined })).status, 409);
@@ -270,8 +271,9 @@ describe("authentication against local D1", { concurrency: false }, () => {
     }, bindings);
     const { clipKeys, audioKey } = cruiseSpec(5);
     for (const key of [clipKeys.opening, clipKeys.finale, audioKey]) await bindings.MEDIA.put(key, "trial asset");
-    const config = await request("/api/templates/24k-magic?version=5", { headers }, bindings);
+    const config = await request("/api/templates/24k-magic", { headers }, bindings);
     const configBody = await config.json() as {template: object; capabilities: {generationEnabled: boolean; pauseReason: string}};
+    assert.deepEqual(await (await request("/api/templates/24k-magic?version=5", { headers }, bindings)).json(), configBody);
     assert.equal(configBody.capabilities.generationEnabled, false);
     assert.equal(configBody.capabilities.pauseReason, "portrait_replacement");
     assert.deepEqual(configBody.template, {
@@ -525,6 +527,7 @@ describe("authentication against local D1", { concurrency: false }, () => {
 
   it("serves only the signed template clip, including provider HEAD and byte-range requests", async (t) => {
     const bindings = env as AppEnv;
+    const { clipKeys: cruiseClipKeys, audioKey: cruiseAudioKey } = cruiseSpec(5);
     await bindings.MEDIA.put(cruiseClipKeys.opening, "opening");
     await bindings.MEDIA.put(cruiseClipKeys.finale, "finale");
     await bindings.MEDIA.delete(cruiseAudioKey);
@@ -533,7 +536,7 @@ describe("authentication against local D1", { concurrency: false }, () => {
 
     const signed = await resolveCruiseAssets(bindings);
     const clip = new URL(signed.opening);
-    assert.equal(clip.pathname, "/api/template-media/fixed/24k-magic/v4/opening");
+    assert.equal(clip.pathname, "/api/template-media/fixed/24k-magic/v5/opening");
     const oldClip = new URL(clip.href);
     oldClip.pathname = "/api/template-media/fixed/24k-magic/v3/opening";
     assert.equal((await request(oldClip.pathname + clip.search)).status, 404);

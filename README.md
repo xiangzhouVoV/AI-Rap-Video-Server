@@ -57,9 +57,9 @@ SEEAPI_API_KEY=填写自己的完整Key
 ## 模板调试
 
 先应用本地迁移 `0002_template_lab.sql`。在 `.dev.vars` 配置 SeeAPI 后，页面可提交真实任务。
-24K Magic v4 用两张单人照分别扮演甲板上的舞者和门口观看的搭档。后台参考片为宽屏卡通，成片为 16:9，可选 480p 或 720p。开场与门口反应各提交 11 秒的生成，按原片第 302 帧与第 605 帧（30 fps）拼接成约 20.17 秒，铺入原片的连续音轨。
+卡通版通过 `GET /api/templates/24k-magic?version=4` 选择，提交时传数字 `templateVersion: 4`。v4 用两张单人照分别扮演甲板上的舞者和门口观看的搭档。后台参考片为宽屏卡通，成片为 16:9，可选 480p 或 720p。开场与门口反应各提交 11 秒的生成，按原片第 302 帧与第 605 帧（30 fps）拼接成约 20.17 秒，铺入原片的连续音轨。
 
-v5 通过 `GET /api/templates/24k-magic?version=5` 选择，提交时传数字 `templateVersion: 5`。该试用用真人原片和连续原声，包含开场双手托在下巴两侧的动作、甲板上的劈叉、白被中的搭档和结尾通风筒镜头。每段生成 15 秒，按 24 fps 在第 356 帧后拼接，共 713 帧（29.71 秒）。开场通过供应商审核并保存成功后才提交后段。默认配置和 `templateVersion: 4` 继续使用卡通版。
+`GET /api/templates/24k-magic` 默认返回真人完整版 v5，也可显式指定 `?version=5`，提交时传数字 `templateVersion: 5`。该试用用真人原片和连续原声，包含开场双手托在下巴两侧的动作、甲板上的劈叉、白被中的搭档和结尾通风筒镜头。每段生成 15 秒，按 24 fps 在第 356 帧后拼接，共 713 帧（29.71 秒）。开场通过供应商审核并保存成功后才提交后段。
 
 固定素材保存在私有 R2 的 `templates/24k-magic/v4/` 和 `templates/24k-magic/v5/` 目录，每版各有 `opening.mp4`、`finale.mp4` 和 `reference-audio.m4a`。服务端检查该版本的三件素材，签发给供应商的短时视频地址仅对对应版本与片段有效。设置 `CRUISE_PAUSED_CLIP_KEY` 可按完整对象键暂停某段素材的付费生成。 v5 的真人参考片在实测中保留了原演员，默认暂停付费生成。验证两张照片均能正确替换各自角色后，才可将 `CRUISE_TRIAL_CAST_VERIFIED` 设为 `true`。
 
@@ -82,7 +82,7 @@ v3 任务按其原有 4:3 参考片、音轨与 26.554 秒时间线处理。v3 �
 | `POST /api/template-generations/:id/retry` | 用户显式重试未完成的部分，携带 UUID `retryId` |
 | `GET /api/template-generations/:id/video` | 本人生成结果，支持 HEAD/Range，`?download=1` 下载 |
 
-v4 新建请求包含 `templateId`、`templateVersion: 4`、`requestId` 和可选的 `resolution`（默认 `720p`）。舞者照片使用 `photoId` 或 `photoUrl`，搭档照片使用 `partnerPhotoId` 或 `partnerPhotoUrl`。两张均为必填，并在两次供应商请求中保持舞者、搭档的顺序。
+新建请求包含 `templateId`、所选配置返回的数字 `templateVersion`、`requestId` 和可选的 `resolution`（默认 `720p`）。舞者照片使用 `photoId` 或 `photoUrl`，搭档照片使用 `partnerPhotoId` 或 `partnerPhotoUrl`。两张均为必填，并在两次供应商请求中保持舞者、搭档的顺序。
 API Key 仅用于服务端调用，不返回浏览器。素材与结果在私有 R2 中；临时令牌到期只停止外部读取，不自动删除存储对象。
 
 费用与恢复规则：
