@@ -3,10 +3,8 @@ import {
   Input, MP4, Mp4OutputFormat, Output, StreamTarget, type InputVideoTrack,
 } from "mediabunny";
 import { prepareCruiseCodec } from "./cruise-codec";
-import { cruiseAudioKey } from "./template-assets";
+import { cruiseSpec } from "./template-assets";
 
-const cutSeconds = 13.7;
-const endSeconds = 26.554;
 const partSize = 5 * 1024 * 1024;
 
 function openTrackFile(bucket: R2Bucket, key: string) {
@@ -81,8 +79,9 @@ async function addScene(track: InputVideoTrack, source: EncodedVideoPacketSource
   }
 }
 
-export async function assembleCruiseVideo(bucket: R2Bucket, firstKey: string, secondKey: string, outputKey: string) {
-  const files = [firstKey, secondKey, cruiseAudioKey].map(key => openTrackFile(bucket, key));
+export async function assembleCruiseVideo(bucket: R2Bucket, firstKey: string, secondKey: string, outputKey: string, version: number) {
+  const { cut: cutSeconds, duration: endSeconds, audioKey } = cruiseSpec(version);
+  const files = [firstKey, secondKey, audioKey].map(key => openTrackFile(bucket, key));
   let upload: R2MultipartUpload | undefined;
   try {
     const [first, second, audio] = await Promise.all([

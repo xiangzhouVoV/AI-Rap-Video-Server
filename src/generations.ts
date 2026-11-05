@@ -2,9 +2,10 @@ import { Hono } from "hono";
 import type { AppBindings, AppEnv } from "./env";
 import { MediaError } from "./media";
 import { ProviderError, providerRequest, type ProviderTask } from "./seeapi";
-import { cruisePromptV2, cruisePromptV1, cruiseTemplateVersion } from "./templates";
+import { cruisePromptV2, cruisePromptV1 } from "./templates";
 
 import { createCruisePlan, advanceCruiseJob, hasRetried, prepareCruiseRetry, cruiseRetryOptions } from "./cruise-jobs";
+import { cruiseTemplateVersion } from "./template-assets";
 import { storeProviderVideo } from "./result-video";
 
 type Job = {
@@ -29,6 +30,11 @@ generationRoutes.post("/", async (c) => {
   }
   const userId = c.get("userId");
   const existing = await findJob(c.env, userId, body.requestId);
+  const expectedVersion = existing?.template_version ?? cruiseTemplateVersion;
+  if (expectedVersion >= 4 ? body.templateVersion !== expectedVersion
+    : body.templateVersion != null && body.templateVersion !== expectedVersion) {
+    return c.json({ error: { code: "TEMPLATE_UPDATED", message: "This template has changed. Reload the page before starting a video." } }, 409);
+  }
   const resolution = body.resolution ?? "720p";
   const portraits = { photoId: body.photoId ?? null, photoUrl: body.photoUrl ?? null,
     partnerPhotoId: body.partnerPhotoId ?? null, partnerPhotoUrl: body.partnerPhotoUrl ?? null };
@@ -44,11 +50,11 @@ generationRoutes.post("/", async (c) => {
       resolution, aspectRatio: body.aspectRatio ?? "9:16", generateAudio: body.generateAudio ?? true,
     };
   } else {
-    const allowed = ["templateId", "requestId", "resolution", ...Object.keys(portraits)];
+    const allowed = ["templateId", "templateVersion", "requestId", "resolution", ...Object.keys(portraits)];
     if (Object.keys(body).some(key => !allowed.includes(key)) || (resolution !== "480p" && resolution !== "720p")) {
       return c.json({ error: { code: "INVALID_INPUT", message: "Use the current template with two portraits and a supported resolution." } }, 400);
     }
-    normalized = { templateId: body.templateId, ...portraits, resolution };
+    normalized = { templateId: body.templateId, ...(expectedVersion >= 4 ? { templateVersion: expectedVersion } : {}), ...portraits, resolution };
   }
   let hash = await requestHash(normalized);
   if (existing?.template_version === 2 && existing.request_hash !== hash) {
@@ -92,12 +98,12 @@ generationRoutes.post("/:id/retry", async (c) => {
   const job = await findJob(c.env, c.get("userId"), c.req.param("id"));
   if (!job) return c.json({ error: { code: "NOT_FOUND", message: "This task was not found in your account." } }, 404);
   if (job.template_version >= 3 && hasRetried(job.provider_body, retryId)) return c.json({ job: publicJob(c.env, job) });
-  if (job.template_version !== 3 || job.status !== "failed") {
+  if (job.template_version < 3 || job.template_version > cruiseTemplateVersion || job.status !== "failed") {
     return c.json({ error: { code: "CANNOT_RETRY", message: "This generation has no failed part to retry." } }, 409);
   }
   let plan: string;
   try {
-    plan = await prepareCruiseRetry(c.env, job.user_id, job.provider_body, retryId);
+    plan = await prepareCruiseRetry(c.env, job.user_id, job.provider_body, retryId, job.template_version);
   } catch (error) {
     if (error instanceof MediaError) return c.json({ error: { code: error.code, message: error.message } }, error.status);
     return c.json({ error: { code: "INVALID_MEDIA", message: "Your photos could not be prepared." } }, 400);
@@ -166,11 +172,11 @@ async function findJob(env: AppEnv, userId: string, id: string) {
 
 function publicJob(env: AppEnv, job: Job) {
   return {
-    id: job.id, requestId: job.request_id, status: job.status, providerTaskId: job.provider_task_id,
+    id: job.id, requestId: job.request_id, templateVersion: job.template_version, status: job.status, providerTaskId: job.provider_task_id,
     estimatedCredits: job.estimated_credits, consumedCredits: job.consumed_credits, refundedCredits: job.refunded_credits,
     videoUrl: job.result_object_key ? `/api/template-generations/${job.id}/video` : null,
     error: job.error, createdAt: job.created_at, updatedAt: job.updated_at,
-    ...(job.template_version === 3 && job.status === "failed" ? cruiseRetryOptions(env, job.provider_body) : { canRetry: false }),
+    ...(job.template_version >= 3 && job.status === "failed" ? cruiseRetryOptions(env, job.provider_body, job.template_version) : { canRetry: false }),
   };
 }
 
@@ -226,7 +232,7 @@ async function processClaimedCruiseJob(env: AppEnv, job: Job): Promise<Job> {
 
 export async function reconcileCruiseJobs(env: AppEnv) {
   const now = new Date().toISOString();
-  const jobs = await env.DB.prepare(`SELECT * FROM template_generation WHERE template_version=3
+  const jobs = await env.DB.prepare(`SELECT * FROM template_generation WHERE template_version IN (3,4)
     AND status IN ('submitting','submission_unknown','processing') AND (lease_until IS NULL OR lease_until<?)
     AND updated_at<? ORDER BY updated_at LIMIT 5`).bind(now, new Date(Date.now()-8000).toISOString()).all<Job>();
   for (const job of jobs.results) {

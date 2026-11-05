@@ -40,7 +40,7 @@ it("recognizes policy failures in generation envelopes, direct tasks and HTTP er
   assert.equal(classifyInputFailure(error.code, "The output video was blocked."), "content_policy");
 });
 
-it("reuses a saved finale and only retries a rejected opening after replacing the reference", async () => {
+it("keeps policy-rejected openings on hold across signed URL changes and isolates legacy footage", async () => {
   const env = {
     BETTER_AUTH_URL: "https://app.example.test", BETTER_AUTH_SECRET: "test-only-signing-secret-with-more-than-32-bytes",
     MEDIA: { head: async () => ({ size: 1 }) },
@@ -52,13 +52,24 @@ it("reuses a saved finale and only retries a rejected opening after replacing th
   const plan = { parts: [opening, finale], resolution: "480p", portraits: { photoUrl: "https://assets.example.test/a.jpg",
     partnerPhotoUrl: "https://assets.example.test/b.jpg" }, retries: [] };
   const before = JSON.stringify(plan);
-  assert.equal(cruiseRetryOptions(env, before).canRetry, false);
-  await assert.rejects(() => prepareCruiseRetry(env, "fixture", before, "retry"), { code: "TEMPLATE_PAUSED" });
-  opening.body = partBody("/api/template-media/fixed/24k-magic/v3/opening");
-  const replaced = JSON.stringify(plan);
-  assert.equal(cruiseRetryOptions(env, replaced).canRetry, true);
-  const next = JSON.parse(await prepareCruiseRetry(env, "fixture", replaced, "retry"));
-  assert.deepEqual(next.parts[1], finale);
-  assert.equal(next.parts[0].attempt, 3);
-  assert.equal(new URL(JSON.parse(next.parts[0].body).input.reference_video[0]).pathname, currentCruiseClipPath("opening"));
+  assert.equal(cruiseRetryOptions(env, before, 4).canRetry, false);
+  await assert.rejects(() => prepareCruiseRetry(env, "fixture", before, "retry", 4), { code: "TEMPLATE_PAUSED" });
+  // This persisted v3 plan has a saved live-action finale. A cartoon opening must never be issued for it.
+  for (const path of ["/api/template-media/fixed/24k-magic/v3/opening", currentCruiseClipPath("opening", 3)]) {
+    opening.body = partBody(path);
+    const legacy = JSON.stringify(plan);
+    assert.equal(cruiseRetryOptions(env, legacy, 3).canRetry, false);
+    await assert.rejects(() => prepareCruiseRetry(env, "fixture", legacy, "retry", 3), { code: "TEMPLATE_PAUSED" });
+  }
+  // A v3 job with its opening saved may still retry its missing v3 finale.
+  const missingFinale = JSON.stringify({ ...plan, parts: [
+    { ...finale, scene: "opening", result: "saved/opening.mp4" },
+    { ...opening, scene: "finale", failure: undefined },
+  ] });
+  const next = JSON.parse(await prepareCruiseRetry(env, "fixture", missingFinale, "retry", 3));
+  const input = JSON.parse(next.parts[1].body).input;
+  assert.equal(next.parts[0].result, "saved/opening.mp4");
+  assert.equal(new URL(input.reference_video[0]).pathname, currentCruiseClipPath("finale", 3));
+  assert.equal(input.aspect_ratio, "4:3");
+  assert.equal(input.duration_seconds, 15);
 });

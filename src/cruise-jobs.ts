@@ -1,8 +1,8 @@
 import type { AppEnv } from "./env";
 import { MediaError, resolveMedia } from "./media";
 import { ProviderError, providerFailure, providerFailureMessages, providerRequest, publicHttpsUrl, type ProviderFailure, type ProviderTask } from "./seeapi";
-import { cruisePauseMessage, currentCruiseClipPath, isCruiseClipPaused, resolveCruiseAssets } from "./template-assets";
-import { scenePrompts } from "./templates";
+import { cruisePauseMessage, cruiseSpec, cruiseTemplateVersion, currentCruiseClipPath, isCruiseClipPaused, resolveCruiseAssets } from "./template-assets";
+import { legacyScenePrompts, scenePrompts } from "./templates";
 import { assembleCruiseVideo } from "./cruise-video";
 import { storeProviderVideo } from "./result-video";
 
@@ -14,7 +14,7 @@ type Part = {
   failure?: ProviderFailure; credits: Credits; previous: (Credits & { failure?: ProviderFailure })[];
 };
 type Plan = { portraits: Portraits; resolution: string; parts: Part[]; retries: string[]; assemblyFailures?: number };
-type LeasedJob = { id: string; user_id: string; provider_body: string; lease_id: string | null };
+type LeasedJob = { template_version: number; id: string; user_id: string; provider_body: string; lease_id: string | null };
 const scenes = ["opening", "finale"] as const;
 const failures = new Set(["failed", "canceled", "refunded", "expired"]);
 const unsubmitted = (part: Part) => part.status === "queued" && !part.taskId;
@@ -30,23 +30,25 @@ async function resolvePortrait(env: AppEnv, user: string, id: unknown, url: unkn
   return publicHttpsUrl(url);
 }
 
-async function makeBodies(env: AppEnv, user: string, photos: Portraits, resolution: string) {
+async function makeBodies(env: AppEnv, user: string, photos: Portraits, resolution: string, version: number) {
   const [dancer, partner] = await Promise.all([
     resolvePortrait(env, user, photos.photoId, photos.photoUrl, "dancer"),
     resolvePortrait(env, user, photos.partnerPhotoId, photos.partnerPhotoUrl, "partner"),
   ]);
-  const references = await resolveCruiseAssets(env);
+  const references = await resolveCruiseAssets(env, version);
+  const { aspectRatio, providerSeconds } = cruiseSpec(version);
+  const prompts = version === 3 ? legacyScenePrompts : scenePrompts;
   return scenes.map((scene) => JSON.stringify({
     model: "seedance-2", endpoint: "reference-to-video", provider: "seeapi", input: {
-      prompt: scenePrompts[scene], reference_images: [dancer, partner], reference_video: [references[scene]],
-      duration_seconds: 15, resolution, aspect_ratio: "4:3", generate_audio: false, nsfw_checker: true,
+      prompt: prompts[scene], reference_images: [dancer, partner], reference_video: [references[scene]],
+      duration_seconds: providerSeconds, resolution, aspect_ratio: aspectRatio, generate_audio: false, nsfw_checker: true,
     },
   }));
 }
 
 export async function createCruisePlan(env: AppEnv, user: string, portraits: Portraits, resolution: string): Promise<string> {
   if (scenes.some(scene => isCruiseClipPaused(env, scene))) throw new MediaError(503, "TEMPLATE_PAUSED", cruisePauseMessage);
-  const bodies = await makeBodies(env, user, portraits, resolution);
+  const bodies = await makeBodies(env, user, portraits, resolution, cruiseTemplateVersion);
   const plan: Plan = { portraits, resolution, retries: [], parts: scenes.map((scene, index) => ({
     scene, attempt: 1, body: bodies[index], status: "queued", credits: {}, previous: [],
   })) };
@@ -57,21 +59,21 @@ export function hasRetried(body: string, retryId: string): boolean {
   return (JSON.parse(body) as Plan).retries.includes(retryId);
 }
 
-function rejectedClipWasReplaced(part: Part): boolean {
+function rejectedClipWasReplaced(part: Part, version: number): boolean {
   try {
     const url = new URL(JSON.parse(part.body).input.reference_video[0]);
-    return url.pathname !== currentCruiseClipPath(part.scene);
+    return url.pathname !== currentCruiseClipPath(part.scene, version);
   } catch {
     return false;
   }
 }
 
-function retryBlock(env: AppEnv, parts: Part[]) {
+function retryBlock(env: AppEnv, parts: Part[], version: number) {
   const missing = parts.filter(part => !part.result);
-  if (missing.some(part => part.failure === "template_video_policy" && !rejectedClipWasReplaced(part))) {
+  if (missing.some(part => part.failure === "template_video_policy" && !rejectedClipWasReplaced(part, version))) {
     return new MediaError(503, "TEMPLATE_PAUSED", providerFailureMessages.template_video_policy);
   }
-  if (missing.some(part => isCruiseClipPaused(env, part.scene))) {
+  if (missing.some(part => isCruiseClipPaused(env, part.scene, version))) {
     return new MediaError(503, "TEMPLATE_PAUSED", cruisePauseMessage);
   }
   for (const { failure } of missing) {
@@ -81,22 +83,22 @@ function retryBlock(env: AppEnv, parts: Part[]) {
   }
 }
 
-export function cruiseRetryOptions(env: AppEnv, body: string) {
+export function cruiseRetryOptions(env: AppEnv, body: string, version: number) {
   const { parts } = JSON.parse(body) as Plan;
-  const block = retryBlock(env, parts);
+  const block = retryBlock(env, parts, version);
   if (block) return { canRetry: false, templatePaused: block.code === "TEMPLATE_PAUSED", error: block.message };
   return { canRetry: true, retryUsesCredits: parts.some(part => !part.result) };
 }
 
 // Only an explicit, authenticated retry allocates a new provider idempotency key.
-export async function prepareCruiseRetry(env: AppEnv, user: string, body: string, retryId: string): Promise<string> {
+export async function prepareCruiseRetry(env: AppEnv, user: string, body: string, retryId: string, version: number): Promise<string> {
   const plan: Plan = JSON.parse(body);
-  const block = retryBlock(env, plan.parts);
+  const block = retryBlock(env, plan.parts, version);
   if (block) throw block;
   plan.retries.push(retryId);
   plan.assemblyFailures = 0;
   if (plan.parts.every(part => part.result)) return JSON.stringify(plan);
-  const bodies = await makeBodies(env, user, plan.portraits, plan.resolution);
+  const bodies = await makeBodies(env, user, plan.portraits, plan.resolution, version);
   plan.parts = plan.parts.map((part, index) => failures.has(part.status) || unsubmitted(part) ? {
     scene: part.scene, body: bodies[index], attempt: part.attempt + 1, status: "queued", credits: {},
     previous: [...part.previous, { ...part.credits, failure: part.failure }],
@@ -118,6 +120,7 @@ function rememberCredits(part: Part, task: ProviderTask) {
 
 export async function advanceCruiseJob(env: AppEnv, job: LeasedJob) {
   const plan: Plan = JSON.parse(job.provider_body);
+  const version = job.template_version;
   let error: string | null = null;
   // Commit every provider identifier before any download or additional submission.
   // The lease fences stale workers; (job, scene, attempt) identifies the exact persisted request.
@@ -131,13 +134,13 @@ export async function advanceCruiseJob(env: AppEnv, job: LeasedJob) {
   }
   // Check both queued scenes before submitting either. Already accepted tasks can still be polled and saved.
   for (const part of plan.parts) {
-    if (unsubmitted(part) && isCruiseClipPaused(env, part.scene)) part.status = "failed";
+    if (unsubmitted(part) && isCruiseClipPaused(env, part.scene, version)) part.status = "failed";
   }
   for (const part of plan.parts) {
     if (part.result || failures.has(part.status)) continue;
     if (unsubmitted(part) && plan.parts.some(p => failures.has(p.status) ||
-      p.status === "submission_unknown" && !p.taskId && isCruiseClipPaused(env, p.scene))) continue;
-    if (part.status === "submission_unknown" && !part.taskId && isCruiseClipPaused(env, part.scene)) {
+      p.status === "submission_unknown" && !p.taskId && isCruiseClipPaused(env, p.scene, version))) continue;
+    if (part.status === "submission_unknown" && !part.taskId && isCruiseClipPaused(env, part.scene, version)) {
       error = cruisePauseMessage;
       continue;
     }
@@ -185,7 +188,7 @@ export async function advanceCruiseJob(env: AppEnv, job: LeasedJob) {
   if (plan.parts.every(p => p.result)) {
     const key = `results/${job.user_id}/${job.id}/video.mp4`;
     try {
-      if (!await env.MEDIA.head(key)) await assembleCruiseVideo(env.MEDIA, plan.parts[0].result!, plan.parts[1].result!, key);
+      if (!await env.MEDIA.head(key)) await assembleCruiseVideo(env.MEDIA, plan.parts[0].result!, plan.parts[1].result!, key, version);
     } catch {
       plan.assemblyFailures = (plan.assemblyFailures ?? 0) + 1;
       error = "Your footage is saved. Finishing the final video is still pending.";
@@ -200,7 +203,7 @@ export async function advanceCruiseJob(env: AppEnv, job: LeasedJob) {
   const failed = plan.parts.some(p => failures.has(p.status));
   if (failed && plan.parts.every(p => p.result || failures.has(p.status) || unsubmitted(p))) {
     const reasons = plan.parts.flatMap(p => p.failure ? [providerFailureMessages[p.failure]] : []);
-    error = retryBlock(env, plan.parts)?.message ?? ([...new Set(reasons)].join(" ") || "The video service could not complete the generation. You can retry the unfinished part.");
+    error = retryBlock(env, plan.parts, version)?.message ?? ([...new Set(reasons)].join(" ") || "The video service could not complete the generation. You can retry the unfinished part.");
     await checkpoint("failed");
     return;
   }

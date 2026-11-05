@@ -130,7 +130,7 @@ describe("authentication against local D1", { concurrency: false }, () => {
     const token = "a".repeat(64);
     await env.DB.prepare(`INSERT INTO template_media (id,user_id,object_key,kind,content_type,byte_size,access_token,created_at)
       VALUES (?,?,?,'photo','image/webp',100,?,?)`).bind(partnerPhotoId, user.id, "partner", token, new Date().toISOString()).run();
-    const body = { requestId: crypto.randomUUID(), templateId: "24k-magic",
+    const body = { requestId: crypto.randomUUID(), templateId: "24k-magic", templateVersion: 4,
       photoUrl: "https://assets.example.test/dancer.jpg", partnerPhotoId };
     const submitted: {body: string; key: string}[] = [];
     let openingPolls = 0;
@@ -161,7 +161,10 @@ describe("authentication against local D1", { concurrency: false }, () => {
     });
 
     const config = await (await request("/api/templates/24k-magic", { headers }, bindings)).json() as { template: object };
-    assert.deepEqual(Object.keys(config.template).sort(), ["aspectRatio", "duration", "id", "name", "resolution", "version"]);
+    assert.deepEqual(config.template, { id: "24k-magic", name: "24K Magic Cruise Dance", version: 4,
+      duration: 605 / 30, aspectRatio: "16:9", resolution: "720p" });
+    assert.equal((await submit({ ...body, templateVersion: undefined })).status, 409);
+    assert.equal((await submit({ ...body, templateVersion: 3 })).status, 409);
     assert.equal((await submit({ ...body, partnerPhotoId: undefined })).status, 400);
     for (const override of ["prompt", "referenceVideoId", "referenceVideoUrl", "referenceAudioUrl", "duration", "aspectRatio", "generateAudio"]) {
       assert.equal((await submit({ ...body, [override]: "override" })).status, 400);
@@ -169,6 +172,7 @@ describe("authentication against local D1", { concurrency: false }, () => {
     assert.equal((await submit(body)).status, 503);
     assert.equal(submitted.length, 0);
     for (const key of [cruiseClipKeys.opening, cruiseClipKeys.finale, cruiseAudioKey]) await bindings.MEDIA.put(key, "fixture");
+    bindings.CRUISE_PAUSED_CLIP_KEY = "templates/24k-magic/v3/720p/01-deck-dance.mp4";
     const response = await submit(body);
     assert.equal(response.status, 202);
     type Public = { job: { id: string; status: string; canRetry: boolean; retryUsesCredits?: boolean; error: string | null; consumedCredits: number; videoUrl: string | null } };
@@ -183,8 +187,8 @@ describe("authentication against local D1", { concurrency: false }, () => {
       assert.deepEqual(input.reference_images, [body.photoUrl, `${origin}/api/template-media/${partnerPhotoId}/content?token=${token}`]);
       assert.equal(new URL(input.reference_video[0]).pathname.endsWith(index ? "/finale" : "/opening"), true);
       assert.equal(input.generate_audio, false);
-      assert.equal(input.aspect_ratio, "4:3");
-      assert.equal(input.duration_seconds, 15);
+      assert.equal(input.aspect_ratio, "16:9");
+      assert.equal(input.duration_seconds, 11);
     }
     const lookup = async () => (await (await request("/api/template-generations/" + job.id, { headers }, bindings)).json() as Public).job;
     const advance = async () => {
@@ -450,7 +454,7 @@ describe("authentication against local D1", { concurrency: false }, () => {
 
     const signed = await resolveCruiseAssets(bindings);
     const clip = new URL(signed.opening);
-    assert.equal(clip.pathname, "/api/template-media/fixed/24k-magic/v3/720p/opening");
+    assert.equal(clip.pathname, "/api/template-media/fixed/24k-magic/v4/opening");
     const oldClip = new URL(clip.href);
     oldClip.pathname = "/api/template-media/fixed/24k-magic/v3/opening";
     assert.equal((await request(oldClip.pathname + clip.search)).status, 404);

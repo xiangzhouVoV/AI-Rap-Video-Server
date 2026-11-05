@@ -57,11 +57,11 @@ SEEAPI_API_KEY=填写自己的完整Key
 ## 模板调试
 
 先应用本地迁移 `0002_template_lab.sql`。在 `.dev.vars` 配置 SeeAPI 后，页面可提交真实任务。
-24K Magic v3 使用两张单人照片，分别对应舞者、白毯搭档。成片 26.554 秒、4:3，可选择 480p 或 720p。每个场景由服务端绑定参考片和提示词，两段成片保存后按 13.700 秒和 12.854 秒的时间线拼接，铺上连续音轨。客户端只发送角色照片和清晰度。
+24K Magic v4 用两张单人照分别扮演甲板上的舞者和门口观看的搭档。后台参考片为宽屏卡通，成片为 16:9，可选 480p 或 720p。开场与门口反应各提交 11 秒的生成，按原片第 302 帧与第 605 帧（30 fps）拼接成约 20.17 秒，铺入原片的连续音轨。
 
-固定素材保存在私有 R2 的 `templates/24k-magic/v3/` 目录。两段 960×720 参考片分别为 `720p/01-deck-dance.mp4` 和 `720p/02-reaction-and-duet.mp4`，连续原声为 `reference-audio.m4a`。该输入尺寸符合供应商每帧至少 407,696 像素的要求，与用户选择的成片清晰度独立。旧版参考片的对象保留至已签发的链接到期。服务端在送单前检查三件素材，为供应商签发每段视频单独的限时读取地址。模板和任务的浏览器响应只提供用户所需的字段。音轨在 Worker 内直接读取。
+固定素材保存在私有 R2 的 `templates/24k-magic/v4/` 目录，分别为 `opening.mp4`、`finale.mp4` 和 `reference-audio.m4a`。服务端检查三件素材，签发给供应商的短时视频地址仅对对应版本与片段有效。设置 `CRUISE_PAUSED_CLIP_KEY` 可按完整对象键暂停某段素材的付费生成。
 
-生产配置 `CRUISE_PAUSED_CLIP_KEY` 指向因真人审核被拦截的开场参考片。它暂停新任务，以及需要再次提交该片段的重试。已提交的片段仍可查询和保存，两段都已保存的任务仍可拼接。保留原文件，确认 SeeAPI 接受授权素材的方式后，再发布已获批的输入版本。
+v3 任务按其原有 4:3 参考片、音轨与 26.554 秒时间线处理。v3 开场因真人审核暂停。已经提交的任务仍可查询和保存，已保存的两段仍可拼接。
 
 - `TEMPLATE_DEBUG_EMAILS` 指定获准调试的 Google 邮箱。localhost 允许已登录开发者。
 - `MEDIA_PUBLIC_BASE_URL` 应指向提供素材读取服务的同一 Worker 和存储环境。线上同域部署可以省略。本地端到端运行可通过 HTTPS 隧道将该 Worker 提供给供应商，同时在本地 R2 放入同名素材。
@@ -80,7 +80,7 @@ SEEAPI_API_KEY=填写自己的完整Key
 | `POST /api/template-generations/:id/retry` | 用户显式重试未完成的部分，携带 UUID `retryId` |
 | `GET /api/template-generations/:id/video` | 本人生成结果，支持 HEAD/Range，`?download=1` 下载 |
 
-生成请求包含 `templateId`、`requestId` 和可选的 `resolution`（默认 `720p`）。舞者照片使用 `photoId` 或 `photoUrl`，搭档照片使用 `partnerPhotoId` 或 `partnerPhotoUrl`。两张均为必填，并在两次供应商请求中保持舞者、搭档的顺序。
+v4 新建请求包含 `templateId`、`templateVersion: 4`、`requestId` 和可选的 `resolution`（默认 `720p`）。舞者照片使用 `photoId` 或 `photoUrl`，搭档照片使用 `partnerPhotoId` 或 `partnerPhotoUrl`。两张均为必填，并在两次供应商请求中保持舞者、搭档的顺序。
 API Key 仅用于服务端调用，不返回浏览器。素材与结果在私有 R2 中；临时令牌到期只停止外部读取，不自动删除存储对象。
 
 费用与恢复规则：
@@ -89,7 +89,7 @@ API Key 仅用于服务端调用，不返回浏览器。素材与结果在私有
 - D1 租约防止并发轮询覆盖结果；同一账号最多两个活动任务。页面刷新后从账号隔离的浏览器记录恢复，记录只含任务 ID。
 - 视频成功后分段保存到 R2（最多 100 MiB）。保存失败保留供应商任务，后续查询继续保存，不重新生成。
 - 只有供应商明确返回的 `estimated_credits/consumed_credits/refunded_credits` 才入账展示；缺失字段保留未知，失败不等于免费或已退款。
-- 页面可查询进度；每两分钟的定时任务也会推进未完成的 v3 任务。每段生成使用独立幂等键。明确失败的生成由用户决定是否重试，已成功保存的片段及自动拼接不会再次提交给供应商。
+- 页面可查询进度；每两分钟的定时任务也会推进未完成的 v3 和 v4 任务。每段生成使用独立幂等键。明确失败的生成由用户决定是否重试，已成功保存的片段及自动拼接不会再次提交给供应商。
 - SeeAPI 积分不是未来出售给用户的站内积分。参考视频输入时长也影响成本，详见 [Seedance 2.0 参数与计费](https://www.seeapi.com/docs/seedance-2/reference-to-video/)。
 
 此调试页保留 canonical/描述/OG，但设置 `noindex, nofollow`；完成样片、参考素材和费用规则验收后再开放搜索收录。

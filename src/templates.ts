@@ -1,12 +1,11 @@
 import { Hono } from "hono";
 import type { AppBindings } from "./env";
 import { publicOrigin } from "./media";
-import { cruisePauseMessage, isCruiseClipPaused } from "./template-assets";
+import { cruisePauseMessage, cruiseSpec, cruiseTemplateVersion, isCruiseClipPaused } from "./template-assets";
 
 // Retain the original default when hashing retries of jobs created with version 1.
 export const cruisePromptV1 = "Make a live-action dance comedy using the selected duration and framing. Cast the person in Image 1 as the sole performer. Keep their facial proportions, hair, skin tone, build and visible clothing consistent across cuts. Use Video 1 to guide the dance rhythm and body mechanics, without copying the reference performer's identity. Open inside a ship's doorway: a proud smile and a brief collar adjustment, hands near the neck. Then cut outside to a sunlit cruise deck and show a full-body sideways groove. Move to a low view of the shoes for a short sliding step and a small kick. Return to a wider view near the deck stairs for loose arm movements, bent knees and a side lunge, ending in a confident pose. Fit the sequence to the requested duration; simplify the cuts when time is short. Keep the playful swagger and believable weight shifts. Recompose each shot for the selected output framing, keeping the complete body visible in wide shots. Use consistent daylight and stable camera positions. Follow the reference audio rhythm where available. No spoken dialogue, extra performers, text or logos. Preserve identity and clothing in every shot; avoid malformed limbs and feet moving through the deck.";
 
-export const cruiseTemplateVersion = 3;
 export const cruisePromptV2 = [
   "Make a live-action cruise-deck dance comedy. Use Image 1 for the dancer's face, skin tone and hairstyle. Use Image 2 for the partner's face, skin tone and hairstyle. Use Video 1 for wardrobe, movement, blocking and camera timing.",
   "The dancer wears a bright yellow coverall, blue gloves and a respirator with pink filters. Open on the dancer smiling and lifting the respirator, then show the dancer's crossing steps on deck.",
@@ -15,21 +14,28 @@ export const cruisePromptV2 = [
 ].join(" ");
 
 const cast = "Cast two distinct people throughout the clip. Use Image 1 for the face, skin tone and hairstyle of A, the deck dancer. A wears a bright yellow coverall, blue gloves, brown boots and a respirator with pink filters at the neck. Use Image 2 for the face, skin tone and hairstyle of B, the partner in a pale yellow shirt, glasses and black tie, later wrapped in a white blanket. Use Video 1 for their costumes, movement, props, blocking, framing, focus and cut timing. Follow each person across cuts, including when one becomes small, turns away or is partly hidden. Keep A matched to Image 1 and B to Image 2 whenever either face is visible. Preserve the reference depth, natural occlusion and horizontal framing.";
-export const scenePrompts = {
+export const legacyScenePrompts = {
   opening: cast + " Open on A smiling and lifting the respirator with both blue gloves. Match the smile and visible face to Image 1. Cut to the deck dance, the boots crossing close to camera, then the low wide view beside the stairs. In the corridor shot, B enters through the left door, stops and leans against the wall. Match B to Image 2 as soon as B appears. A is still dancing far behind B on the deck. Preserve that distance through the last corridor frame.",
   finale: cast + " Open close on B resting the head against one hand. Use Image 2 for B and keep the distant dancer A matched to Image 1. Follow the glance, the insert of the red emergency case and the cut back to B lifting both fists. By the funnel, A runs, kicks and drops into a split beside the white blanket. In the closing two-shot, A dances on the left behind B. B smiles from under the blanket in the right foreground. Show the Image 1 dancer and the Image 2 partner together through the final frame. Keep the blanket edge in front of B where it covers the face.",
+};
+
+const cartoonCast = "Recreate the cartoon choreography as a live-action scene on a bright ship deck. Cast the person in Image 1 as the magenta-hooded dancer and the person in Image 2 as the human reacting in the doorway. Preserve each photo subject's facial features, hair and natural human proportions. Use Video 1 to match camera positions, cuts, dance steps and the relative positions of the two roles. Translate the bear's performance into human posture, hands and expressions for the Image 2 actor. Keep the wide horizontal framing.";
+export const scenePrompts = {
+  opening: cartoonCast + " This opening follows the Image 1 dancer. Frame the hands clapping beside the face, then the turn and the stepping feet. Cut low to the footwork, then wide as the dancer performs by the deck stairs. Follow the changes of camera angle and the movement in Video 1. Keep the doorway partner offscreen throughout this opening.",
+  finale: cartoonCast + " Open at the corridor doorway: the Image 2 partner steps out from the left, leans against the wall and watches. The Image 1 dancer continues moving far away by the railing. Match the partner's close-up reaction, the brief red emergency case insert, and the return to the partner raising both hands at the end.",
 };
 
 export const templateRoutes = new Hono<AppBindings>();
 templateRoutes.get("/24k-magic", (c) => {
   let uploadsPublic = false;
+  const { duration, aspectRatio } = cruiseSpec(cruiseTemplateVersion);
   const templatePaused = isCruiseClipPaused(c.env, "opening") || isCruiseClipPaused(c.env, "finale");
   try { publicOrigin(c.env); uploadsPublic = true; } catch { /* Local uploads remain available for preview. */ }
   return c.json({
     userId: c.get("userId"),
     template: {
       id: "24k-magic", name: "24K Magic Cruise Dance", version: cruiseTemplateVersion,
-      duration: 26.554, resolution: "720p", aspectRatio: "4:3",
+      duration, resolution: "720p", aspectRatio,
     },
     capabilities: {
       generationEnabled: Boolean(c.env.SEEAPI_API_KEY) && uploadsPublic && !templatePaused, uploadsPublic, templatePaused,
