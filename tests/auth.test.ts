@@ -115,6 +115,48 @@ describe("authentication against local D1", { concurrency: false }, () => {
     });
   });
 
+  it("sends both portraits in role order and ties the partner to the request ID", async (t) => {
+    const { user, cookie } = await createSession();
+    const bindings = { ...env, TEMPLATE_DEBUG_EMAILS: user.email, SEEAPI_API_KEY: "test-only",
+      SEEAPI_API_BASE_URL: "https://provider.example.test", MEDIA_PUBLIC_BASE_URL: origin };
+    const submit = (body: Record<string, unknown>) => request("/api/template-generations", {
+      method: "POST", headers: { Origin: origin, Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, bindings);
+    const requestBody = { requestId: crypto.randomUUID(), templateId: "24k-magic",
+      photoUrl: "https://assets.example.test/dancer.jpg", referenceVideoUrl: "https://assets.example.test/reference.mp4" };
+    const partnerPhotoId = crypto.randomUUID();
+    const token = "a".repeat(64);
+    await env.DB.prepare(`INSERT INTO template_media (id,user_id,object_key,kind,content_type,byte_size,access_token,created_at)
+      VALUES (?,?,?,'photo','image/webp',100,?,?)`).bind(partnerPhotoId, user.id, "partner", token, new Date().toISOString()).run();
+    const realFetch = globalThis.fetch;
+    const submitted: string[][] = [];
+    t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input) !== "https://provider.example.test/v1/generations") return realFetch(input, init);
+      submitted.push(JSON.parse(String(init?.body)).input.reference_images);
+      return Response.json({ generation: { id: "test-generation", status: "processing" } });
+    });
+
+    assert.equal((await submit(requestBody)).status, 400);
+    const paired = { partnerPhotoId, ...requestBody };
+    assert.equal((await submit(paired)).status, 202);
+    assert.equal((await submit(paired)).status, 200);
+    assert.equal((await submit({ ...requestBody, partnerPhotoUrl: "https://assets.example.test/other.jpg" })).status, 409);
+    assert.deepEqual(submitted, [[requestBody.photoUrl, `${origin}/api/template-media/${partnerPhotoId}/content?token=${token}`]]);
+    assert.equal(await env.DB.prepare("SELECT template_version FROM template_generation WHERE request_id=?")
+      .bind(requestBody.requestId).first("template_version"), 2);
+
+    // A stored version 1 job using the original default prompt can still be resumed.
+    const legacyRequest = { ...requestBody, requestId: crypto.randomUUID() };
+    const now = new Date().toISOString();
+    await env.DB.prepare(`INSERT INTO template_generation
+      (id,user_id,request_id,request_hash,template_id,template_version,provider_body,status,created_at,updated_at)
+      VALUES (?,?,?,?,'24k-magic',1,'{}','canceled',?,?)`)
+      .bind(crypto.randomUUID(), user.id, legacyRequest.requestId, "14e4005f88800713ef71761d6c799b854e18b09e9038e955a9d86961543247c3", now, now).run();
+    assert.equal((await submit(legacyRequest)).status, 200);
+    assert.equal((await submit({ ...legacyRequest, partnerPhotoId })).status, 409);
+  });
+
   it("rejects a forged session cookie", async () => {
     const { cookie } = await createSession();
     const response = await request("/api/me", { headers: { Cookie: `${cookie}tampered` } });

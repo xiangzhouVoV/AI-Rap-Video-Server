@@ -85,7 +85,7 @@ SEEAPI_API_KEY=填写自己的完整Key
 | `GET /api/template-generations/:id/video` | 本人生成结果，支持 HEAD/Range，`?download=1` 下载 |
 
 生成请求包含 `templateId`、`requestId`、`prompt`、`duration`、`resolution`、`aspectRatio`、`generateAudio`；
-照片和参考视频分别传 `photoId/photoUrl`、`referenceVideoId/referenceVideoUrl` 中一个，可选 `referenceAudioId/referenceAudioUrl`。
+舞者照片使用 `photoId` 或 `photoUrl`，白毯搭档照片使用 `partnerPhotoId` 或 `partnerPhotoUrl`。两张均为必填，按舞者、搭档的顺序传入 SeeAPI 的 `reference_images`。参考视频使用 `referenceVideoId` 或 `referenceVideoUrl`，可选音频使用 `referenceAudioId` 或 `referenceAudioUrl`。
 API Key 仅用于服务端调用，不返回浏览器。素材与结果在私有 R2 中；临时令牌到期只停止外部读取，不自动删除存储对象。
 
 费用与恢复规则：

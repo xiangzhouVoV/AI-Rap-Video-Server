@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { AppBindings, AppEnv } from "./env";
 import { MediaError, resolveMedia } from "./media";
 import { ProviderError, providerRequest, publicHttpsUrl, type ProviderTask } from "./seeapi";
-import { cruisePrompt } from "./templates";
+import { cruisePrompt, cruisePromptV1, cruiseTemplateVersion } from "./templates";
 
 type Job = {
   id: string; user_id: string; request_id: string; request_hash: string;
@@ -28,28 +28,33 @@ generationRoutes.post("/", async (c) => {
   const resolution = body.resolution ?? "720p";
   const aspectRatio = body.aspectRatio ?? "9:16";
   const generateAudio = body.generateAudio ?? true;
-  const prompt = typeof body.prompt === "string" ? body.prompt.trim() : cruisePrompt;
+  const userId = c.get("userId");
+  const existing = await findJob(c.env, userId, body.requestId);
+  const legacy = existing?.template_version === 1;
+  const defaultPrompt = legacy ? cruisePromptV1 : cruisePrompt;
+  const prompt = typeof body.prompt === "string" ? body.prompt.trim() : defaultPrompt;
   if (![5, 10, 15].includes(duration as number) || !["480p", "720p"].includes(resolution as string)
     || !["9:16", "16:9"].includes(aspectRatio as string) || typeof generateAudio !== "boolean" || !prompt || prompt.length > 6000) {
     return c.json({ error: { code: "INVALID_INPUT", message: "Check duration, resolution, framing and prompt (maximum 6,000 characters)." } }, 400);
   }
   const normalized = {
     templateId: body.templateId, photoId: body.photoId ?? null, photoUrl: body.photoUrl ?? null,
+    // Omit absent partner fields from the serialized hash for version 1 retries.
+    partnerPhotoId: body.partnerPhotoId ?? undefined, partnerPhotoUrl: body.partnerPhotoUrl ?? undefined,
     referenceVideoId: body.referenceVideoId ?? null, referenceVideoUrl: body.referenceVideoUrl ?? null,
     referenceAudioId: body.referenceAudioId ?? null, referenceAudioUrl: body.referenceAudioUrl ?? null,
     prompt, duration, resolution, aspectRatio, generateAudio,
   };
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(normalized)));
   const hash = [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
-  const userId = c.get("userId");
-  const existing = await findJob(c.env, userId, body.requestId);
   if (existing) {
     if (existing.request_hash !== hash) return c.json({ error: { code: "REQUEST_CONFLICT", message: "This request ID belongs to different inputs. Keep the original inputs when resuming." } }, 409);
     return c.json({ job: publicJob(await refreshJob(c.env, existing)) });
   }
-  let photo: string, video: string, audio: string | undefined;
+  let dancerPhoto: string, partnerPhoto: string, video: string, audio: string | undefined;
   try {
-    photo = await resolveInput(c.env, userId, "photo", body.photoId, body.photoUrl);
+    dancerPhoto = await resolveInput(c.env, userId, "photo", body.photoId, body.photoUrl, "dancer portrait");
+    partnerPhoto = await resolveInput(c.env, userId, "photo", body.partnerPhotoId, body.partnerPhotoUrl, "partner portrait");
     video = await resolveInput(c.env, userId, "video", body.referenceVideoId,
       body.referenceVideoUrl || (!body.referenceVideoId ? c.env.TEMPLATE_REFERENCE_VIDEO_URL : undefined));
     if (body.referenceAudioId || body.referenceAudioUrl) audio = await resolveInput(c.env, userId, "audio", body.referenceAudioId, body.referenceAudioUrl);
@@ -60,7 +65,7 @@ generationRoutes.post("/", async (c) => {
   const providerBody = JSON.stringify({
     model: "seedance-2", endpoint: "reference-to-video", provider: "seeapi",
     input: {
-      prompt, reference_images: [photo], reference_video: [video],
+      prompt, reference_images: [dancerPhoto, partnerPhoto], reference_video: [video],
       ...(audio ? { reference_audio: [audio] } : {}),
       duration_seconds: duration, resolution, aspect_ratio: aspectRatio, generate_audio: generateAudio, nsfw_checker: true,
     },
@@ -69,10 +74,10 @@ generationRoutes.post("/", async (c) => {
   const now = new Date().toISOString();
   const inserted = await c.env.DB.prepare(`INSERT INTO template_generation
     (id,user_id,request_id,request_hash,template_id,template_version,provider_body,status,created_at,updated_at,lease_id,lease_until)
-    SELECT ?,?,?,?,?,1,?,'submitting',?,?,?,?
+    SELECT ?,?,?,?,?,?,?,'submitting',?,?,?,?
     WHERE (SELECT COUNT(*) FROM template_generation WHERE user_id=? AND status IN ('submitting','submission_unknown','processing')) < 2
     ON CONFLICT(user_id,request_id) DO NOTHING`)
-    .bind(id, userId, body.requestId, hash, "24k-magic", providerBody, now, now, id, new Date(Date.now() + 120_000).toISOString(), userId).run();
+    .bind(id, userId, body.requestId, hash, "24k-magic", cruiseTemplateVersion, providerBody, now, now, id, new Date(Date.now() + 120_000).toISOString(), userId).run();
   if (!inserted.meta.changes) {
     const raced = await findJob(c.env, userId, body.requestId);
     if (raced && raced.request_hash === hash) return c.json({ job: publicJob(raced) });
@@ -122,14 +127,14 @@ generationRoutes.on(["GET", "HEAD"], "/:id/video", async (c) => {
   return new Response(c.req.method === "HEAD" ? null : object.body, { status, headers });
 });
 
-async function resolveInput(env: AppEnv, userId: string, kind: "photo" | "video" | "audio", id: unknown, url: unknown) {
+async function resolveInput(env: AppEnv, userId: string, kind: "photo" | "video" | "audio", id: unknown, url: unknown, label = "reference " + kind) {
   if (id && url) throw new Error(`Choose an uploaded ${kind} or a URL, not both.`);
   if (typeof id === "string") {
     const asset = await resolveMedia(env, userId, id);
     if (asset.kind !== kind) throw new Error(`The selected asset is not a ${kind}.`);
     return asset.url;
   }
-  if (!url) throw new Error(`A ${kind === "photo" ? "portrait" : "reference " + kind} is required.`);
+  if (!url) throw new Error(`A ${label} is required.`);
   return publicHttpsUrl(url);
 }
 
