@@ -5,6 +5,7 @@ export type AppEnv = AuthEnv & Pick<Env, "MEDIA" | "IMAGES"> & {
   SEEAPI_API_BASE_URL?: string;
   MEDIA_PUBLIC_BASE_URL?: string;
   CRUISE_PAUSED_CLIP_KEY?: string;
+  CRUISE_TRIAL_CAST_VERIFIED?: string;
   TEMPLATE_DEBUG_EMAILS?: string;
 };
 

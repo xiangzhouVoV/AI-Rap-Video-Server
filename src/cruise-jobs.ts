@@ -1,7 +1,7 @@
 import type { AppEnv } from "./env";
 import { MediaError, resolveMedia } from "./media";
 import { ProviderError, providerFailure, providerFailureMessages, providerRequest, publicHttpsUrl, type ProviderFailure, type ProviderTask } from "./seeapi";
-import { cruisePauseMessage, cruiseSpec, cruiseTrialVersion, currentCruiseClipPath, isCruiseClipPaused, resolveCruiseAssets } from "./template-assets";
+import { cruisePauseReason, cruiseSpec, cruiseTrialVersion, currentCruiseClipPath, isCruiseClipPaused, resolveCruiseAssets } from "./template-assets";
 import { legacyScenePrompts, scenePrompts, trialScenePrompts } from "./templates";
 import { assembleCruiseVideo } from "./cruise-video";
 import { storeProviderVideo } from "./result-video";
@@ -47,7 +47,7 @@ async function makeBodies(env: AppEnv, user: string, photos: Portraits, resoluti
 }
 
 export async function createCruisePlan(env: AppEnv, user: string, portraits: Portraits, resolution: string, version: number): Promise<string> {
-  if (scenes.some(scene => isCruiseClipPaused(env, scene, version))) throw new MediaError(503, "TEMPLATE_PAUSED", cruisePauseMessage);
+  if (scenes.some(scene => isCruiseClipPaused(env, scene, version))) throw new MediaError(503, "TEMPLATE_PAUSED", cruisePauseReason(env, version));
   const bodies = await makeBodies(env, user, portraits, resolution, version);
   const plan: Plan = { portraits, resolution, retries: [], parts: scenes.map((scene, index) => ({
     scene, attempt: 1, body: bodies[index], status: "queued", credits: {}, previous: [],
@@ -74,7 +74,7 @@ function retryBlock(env: AppEnv, parts: Part[], version: number) {
     return new MediaError(503, "TEMPLATE_PAUSED", providerFailureMessages.template_video_policy);
   }
   if (missing.some(part => isCruiseClipPaused(env, part.scene, version))) {
-    return new MediaError(503, "TEMPLATE_PAUSED", cruisePauseMessage);
+    return new MediaError(503, "TEMPLATE_PAUSED", cruisePauseReason(env, version));
   }
   for (const { failure } of missing) {
     if (failure === "photo_policy" || failure === "content_policy") {
@@ -147,7 +147,7 @@ export async function advanceCruiseJob(env: AppEnv, job: LeasedJob) {
     if (unsubmitted(part) && plan.parts.some(p => failures.has(p.status) ||
       p.status === "submission_unknown" && !p.taskId && isCruiseClipPaused(env, p.scene, version))) continue;
     if (part.status === "submission_unknown" && !part.taskId && isCruiseClipPaused(env, part.scene, version)) {
-      error = cruisePauseMessage;
+      error = cruisePauseReason(env, version);
       continue;
     }
     const key = `results/${job.user_id}/${job.id}/${part.scene}-${part.attempt}.mp4`;

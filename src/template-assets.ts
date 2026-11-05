@@ -44,10 +44,21 @@ export type Clip = keyof typeof cruiseClipKeys;
 
 export const cruisePauseMessage = "Generation is paused for this template pending approval. You can check again later.";
 
+// Enable the paid full-length trial only after both roles have been checked against the portraits.
+export function isCruiseCastPaused(env: AppEnv, version: number) {
+  return version === cruiseTrialVersion && env.CRUISE_TRIAL_CAST_VERIFIED !== "true";
+}
+
+export function cruisePauseReason(env: AppEnv, version: number) {
+  return isCruiseCastPaused(env, version)
+    ? "The full-length version is paused because it kept the original actors instead of using your photos."
+    : cruisePauseMessage;
+}
+
 export function isCruiseClipPaused(env: AppEnv, scene: Clip, version = cruiseTemplateVersion) {
   // The retired opening was rejected by the provider. Keep it on hold even if the active hold changes.
   if (version === 3 && scene === "opening") return true;
-  return env.CRUISE_PAUSED_CLIP_KEY === cruiseSpec(version).clipKeys[scene];
+  return isCruiseCastPaused(env, version) || env.CRUISE_PAUSED_CLIP_KEY === cruiseSpec(version).clipKeys[scene];
 }
 
 export function currentCruiseClipPath(scene: Clip, version = cruiseTemplateVersion) {

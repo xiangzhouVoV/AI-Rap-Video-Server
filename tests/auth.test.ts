@@ -262,7 +262,7 @@ describe("authentication against local D1", { concurrency: false }, () => {
 
   it("pins the full-length trial and submits its finale only after saving the opening", async (t) => {
     const { user, cookie } = await createSession();
-    const bindings = { ...(env as AppEnv), CRUISE_PAUSED_CLIP_KEY: "", TEMPLATE_DEBUG_EMAILS: user.email,
+    const bindings = { ...(env as AppEnv), CRUISE_PAUSED_CLIP_KEY: "", CRUISE_TRIAL_CAST_VERIFIED: "", TEMPLATE_DEBUG_EMAILS: user.email,
       SEEAPI_API_KEY: "test-only", SEEAPI_API_BASE_URL: "https://provider.example.test", MEDIA_PUBLIC_BASE_URL: origin };
     const headers = { Origin: origin, Cookie: cookie, "Content-Type": "application/json" };
     const submit = (body: object, suffix = "") => request("/api/template-generations" + suffix, {
@@ -271,7 +271,10 @@ describe("authentication against local D1", { concurrency: false }, () => {
     const { clipKeys, audioKey } = cruiseSpec(5);
     for (const key of [clipKeys.opening, clipKeys.finale, audioKey]) await bindings.MEDIA.put(key, "trial asset");
     const config = await request("/api/templates/24k-magic?version=5", { headers }, bindings);
-    assert.deepEqual((await config.json() as {template: object}).template, {
+    const configBody = await config.json() as {template: object; capabilities: {generationEnabled: boolean; pauseReason: string}};
+    assert.equal(configBody.capabilities.generationEnabled, false);
+    assert.equal(configBody.capabilities.pauseReason, "portrait_replacement");
+    assert.deepEqual(configBody.template, {
       id: "24k-magic", name: "24K Magic Cruise Dance", version: 5, duration: 713 / 24, aspectRatio: "16:9", resolution: "720p",
     });
     const signed = new URL((await resolveCruiseAssets(bindings, 5)).opening);
@@ -309,6 +312,11 @@ describe("authentication against local D1", { concurrency: false }, () => {
       return (await response.json() as { job: { status: string; canRetry: boolean; consumedCredits: number } }).job;
     }
     const body = { ...photos, requestId: crypto.randomUUID() };
+    const paused = await submit(body);
+    assert.equal(paused.status, 503);
+    assert.equal((await paused.json() as {error: {code: string}}).error.code, "TEMPLATE_PAUSED");
+    assert.deepEqual(submitted, []);
+    bindings.CRUISE_TRIAL_CAST_VERIFIED = "true";
     const first = await submit(body);
     assert.equal(first.status, 202);
     const { job } = await first.json() as { job: { id: string; templateVersion: number } };
