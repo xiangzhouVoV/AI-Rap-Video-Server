@@ -13,10 +13,23 @@
     {
       "pattern": "https://airaptovideo.app/api/me*",
       "zone_name": "airaptovideo.app"
+    },
+    {
+      "pattern": "https://airaptovideo.app/api/templates/*",
+      "zone_name": "airaptovideo.app"
+    },
+    {
+      "pattern": "https://airaptovideo.app/api/template-media*",
+      "zone_name": "airaptovideo.app"
+    },
+    {
+      "pattern": "https://airaptovideo.app/api/template-generations*",
+      "zone_name": "airaptovideo.app"
     }
   ],
   "vars": {
-    "BETTER_AUTH_URL": "https://airaptovideo.app"
+    "BETTER_AUTH_URL": "https://airaptovideo.app",
+    "SEEAPI_API_BASE_URL": "https://api.seeapi.com"
   },
   "d1_databases": [{
     "binding": "DB",

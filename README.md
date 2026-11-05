@@ -1,8 +1,9 @@
 # AI-Rap-Video-Server
 
 AI-Rap-Video 的独立 Cloudflare Workers 后端，使用 Hono + Better Auth 1.7.14 + 原生 D1。
-前端项目位于同级 `../AI-Rap-Video`。本次实现 Google 登录、D1 用户及会话、获取当前用户和退出登录。
-视频平台已选择 SeeAPI；视频生成、上传、支付和积分不属于本次代码范围。
+前端项目位于同级 `../AI-Rap-Video`。提供 Google 登录、D1 用户及会话，以及 24K Magic 模板调试接口。
+模板使用 SeeAPI Seedance 2.0 reference-to-video，支持私有素材上传、真实生成、任务恢复和结果保存。
+套餐、站内积分扣减和支付尚未实现；模板生成限开发环境或配置的测试账号使用。
 
 ## 本地启动
 
@@ -27,7 +28,76 @@ Google Cloud Console 创建 **Web application** OAuth 客户端，登记：
 
 前端 `.env.local` 配置 `AUTH_BACKEND_URL=http://127.0.0.1:8787`，重启前端 `npm run dev` 后从
 `http://localhost:3000` 访问。使用 localhost 这一固定地址，不要混用 127.0.0.1 或临时切换端口。
-前端只代理 `/api/auth/*` 和 `/api/me`，现有上传/生成 API 本次保持原逻辑。
+前端代理 `/api/auth/*`、`/api/me`、`/api/templates/*`、`/api/template-media/*` 和 `/api/template-generations/*`。
+打开 `http://localhost:3000/effects/24k-magic`，登录后可调试。新模板不经过旧的样片生成接口。
+
+## SeeAPI 接入准备
+
+生产 Worker 已通过控制台配置 `SEEAPI_API_KEY`（Secret）和 `SEEAPI_API_BASE_URL`（普通变量）。
+`wrangler.jsonc` 同步保存 API 地址 `https://api.seeapi.com`，真实 Key 不写入该文件。
+
+本地调试前，在现有 `.dev.vars` 追加以下配置，保留原有 Google 登录配置：
+
+```dotenv
+SEEAPI_API_BASE_URL=https://api.seeapi.com
+SEEAPI_API_KEY=填写自己的完整Key
+```
+
+当前 Wrangler 部署会保留已配置的线上 Secret；本地验证只需填写 `.dev.vars`。
+如需从本机统一管理或重新写入生产凭据，可在 `.secrets.production.json` 的现有 JSON 对象中
+追加 `SEEAPI_API_KEY` 属性，再使用下方 `deploy --secrets-file` 流程。
+不要将真实 Key 写入 `.dev.vars.example` 或提交到 Git。
+
+2026-11-04 已从本地使用 `.dev.vars` 中的 Key 调用 `GET /v1/credits`，返回 HTTP 200，
+并成功读取 `total_credit`、`debt_credit`、`display_credit`。该请求不创建视频生成任务。
+此结果验证了本地凭据与 SeeAPI 的连接；尚未验证生产 Worker 的出站调用，
+该历史检查不代表本次模板已经完成真实视频生成验收。
+接口约定见 [SeeAPI 官方接入文档](https://www.seeapi.com/docs/getting-started/)。
+
+## 模板调试
+
+先应用本地迁移 `0002_template_lab.sql`。在 `.dev.vars` 配置 SeeAPI 后，页面可提交真实任务。
+默认 10 秒、720p、9:16、生成声音；可选择 5/10/15 秒、480p/720p、9:16/16:9，编辑英文提示词。
+模板及版本保存在后端 `src/templates.ts`，每次任务在 D1 保存准确的供应商请求、参数与费用，便于后续比较生成成本。
+当前预设是待验证的创作方案，不保证还原舞步或原歌曲。
+
+可选配置见 `.dev.vars.example`：
+
+- `TEMPLATE_DEBUG_EMAILS`：正式 HTTPS 环境必须设置允许调试的 Google 邮箱，逗号分隔；空值拒绝所有账号。localhost 上允许已登录开发者。
+- `TEMPLATE_REFERENCE_VIDEO_URL`：自有的默认参考视频 HTTPS 直链。未配置时由调试者上传参考片或填写直链。用户可覆盖默认参考片。
+- `MEDIA_PUBLIC_BASE_URL`：公开可达、指向**本 Worker 同一存储环境**的 HTTPS origin。正式同域部署可省略；本地上传需要该公网入口才能被供应商读取。
+
+仅把 `MEDIA_PUBLIC_BASE_URL` 填成正式域名不能让正式 Worker 读取本地 R2。没有公网入口时，可在页面选择照片与参考视频的公开 HTTPS 直链；localhost 文件仍可上传和预览，但不能提交给 SeeAPI。
+参考视频要求 MP4/MOV、2–15 秒、480p/720p、24–60fps，最大 50 MiB；可选参考音频为 MP3/WAV、2–15 秒、最大 15 MiB。
+照片为 JPEG/PNG/WebP、最大 10 MiB，由 Images 实际解码为最长边 2048 的静态 WebP 后存储并去除元数据。
+外部素材 URL 会直接交给供应商，网页地址不是视频直链；直链的可访问性及媒体规格需自行确认。
+
+接口（除带临时令牌的素材内容读取外，都需要会话和调试权限）：
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /api/templates/24k-magic` | 模板、提示词、当前账号及生成能力 |
+| `POST /api/template-media` | multipart `file` + `kind=photo/video/audio` 上传 |
+| `GET /api/template-media/:id/preview` | 本人素材预览，支持 HEAD/Range |
+| `GET /api/template-media/:id/content?token=…` | 供应商读取素材，单文件令牌 24 小时有效 |
+| `POST /api/template-generations` | 保存输入后调用 SeeAPI，需 UUID `requestId` |
+| `GET /api/template-generations/:id` | 以任务 ID 或 requestId 查询/恢复同一账号任务 |
+| `GET /api/template-generations/:id/video` | 本人生成结果，支持 HEAD/Range，`?download=1` 下载 |
+
+生成请求包含 `templateId`、`requestId`、`prompt`、`duration`、`resolution`、`aspectRatio`、`generateAudio`；
+照片和参考视频分别传 `photoId/photoUrl`、`referenceVideoId/referenceVideoUrl` 中一个，可选 `referenceAudioId/referenceAudioUrl`。
+API Key 仅用于服务端调用，不返回浏览器。素材与结果在私有 R2 中；临时令牌到期只停止外部读取，不自动删除存储对象。
+
+费用与恢复规则：
+
+- 相同 `requestId` 只能对应相同输入；服务端固定 SeeAPI `Idempotency-Key` 和原始请求正文。超时用原任务恢复，不能自动创建新任务。
+- D1 租约防止并发轮询覆盖结果；同一账号最多两个活动任务。页面刷新后从账号隔离的浏览器记录恢复，记录只含任务 ID。
+- 视频成功后分段保存到 R2（最多 100 MiB）。保存失败保留供应商任务，后续查询继续保存，不重新生成。
+- 只有供应商明确返回的 `estimated_credits/consumed_credits/refunded_credits` 才入账展示；缺失字段保留未知，失败不等于免费或已退款。
+- 页面查询间隔 10 秒；关闭页面后不会后台轮询，重新打开后继续。重新生成会创建新付费任务。
+- SeeAPI 积分不是未来出售给用户的站内积分。参考视频输入时长也影响成本，详见 [Seedance 2.0 参数与计费](https://www.seeapi.com/docs/seedance-2/reference-to-video/)。
+
+此调试页保留 canonical/描述/OG，但设置 `noindex, nofollow`；完成样片、参考素材和费用规则验收后再开放搜索收录。
 
 ## 认证接口与数据
 
@@ -49,7 +119,7 @@ D1 迁移包含 `user`、`session`、`account`、`verification` 以及数据库�
 npm run cf:types
 npm run verify
 # 修改认证配置后，先使本地库处于已应用的历史迁移状态，再生成新迁移：
-npm run db:generate -- 0002_auth.sql
+npm run db:generate -- 0003_auth.sql
 npm run db:migrate:local
 ```
 
@@ -103,4 +173,5 @@ npx --yes --package=node@24 node ./node_modules/wrangler/bin/wrangler.js d1 migr
 - 用户完成真实 Google 登录，页面显示 Sean；刷新后仍显示 Sean。
 - 用户点击 Sign out 后，页面恢复 Sign in。
 
-以上完成本阶段登录验收。上传、视频生成、支付和积分仍按后续阶段推进。
+以上为历史登录验收。本次模板接口的代码和路由已准备，尚未应用远程 `0002_template_lab.sql` 或发布。
+正式发布前需配置 `TEMPLATE_DEBUG_EMAILS`，应用远程迁移并同步前后端；生产 R2 bucket 和 Images binding 也必须可用。
