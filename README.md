@@ -57,35 +57,28 @@ SEEAPI_API_KEY=填写自己的完整Key
 ## 模板调试
 
 先应用本地迁移 `0002_template_lab.sql`。在 `.dev.vars` 配置 SeeAPI 后，页面可提交真实任务。
-默认 10 秒、720p、9:16、生成声音；可选择 5/10/15 秒、480p/720p、9:16/16:9，编辑英文提示词。
-模板及版本保存在后端 `src/templates.ts`，每次任务在 D1 保存准确的供应商请求、参数与费用，便于后续比较生成成本。
-当前预设是待验证的创作方案，不保证还原舞步或原歌曲。
+24K Magic v3 使用两张单人照片，分别对应舞者、白毯搭档。成片 26.554 秒、4:3，可选择 480p 或 720p。每个场景由服务端绑定参考片和提示词，两段成片保存后按 13.700 秒和 12.854 秒的时间线拼接，铺上连续音轨。客户端只发送角色照片和清晰度。
 
-可选配置见 `.dev.vars.example`：
+固定素材由模板制作者放入私有 R2 的 `templates/24k-magic/v3/`：`01-deck-dance.mp4`、`02-reaction-and-duet.mp4`、`reference-audio.m4a`。对象键随发布版本固定。服务端在送单前检查三件素材，为供应商签发每段视频单独的限时读取地址。模板和任务的浏览器响应只提供用户所需的字段。音轨在 Worker 内直接读取。
 
-- `TEMPLATE_DEBUG_EMAILS`：正式 HTTPS 环境必须设置允许调试的 Google 邮箱，逗号分隔；空值拒绝所有账号。localhost 上允许已登录开发者。
-- `TEMPLATE_REFERENCE_VIDEO_URL`：自有的默认参考视频 HTTPS 直链。未配置时由调试者上传参考片或填写直链。用户可覆盖默认参考片。
-- `MEDIA_PUBLIC_BASE_URL`：公开可达、指向**本 Worker 同一存储环境**的 HTTPS origin。正式同域部署可省略；本地上传需要该公网入口才能被供应商读取。
-
-仅把 `MEDIA_PUBLIC_BASE_URL` 填成正式域名不能让正式 Worker 读取本地 R2。没有公网入口时，可在页面选择照片与参考视频的公开 HTTPS 直链；localhost 文件仍可上传和预览，但不能提交给 SeeAPI。
-参考视频要求 MP4/MOV、2–15 秒、480p/720p、24–60fps，最大 50 MiB；可选参考音频为 MP3/WAV、2–15 秒、最大 15 MiB。
-照片为 JPEG/PNG/WebP、最大 10 MiB，由 Images 实际解码为最长边 2048 的静态 WebP 后存储并去除元数据。
-外部素材 URL 会直接交给供应商，网页地址不是视频直链；直链的可访问性及媒体规格需自行确认。
+- `TEMPLATE_DEBUG_EMAILS` 指定获准调试的 Google 邮箱。localhost 允许已登录开发者。
+- `MEDIA_PUBLIC_BASE_URL` 应指向提供素材读取服务的同一 Worker 和存储环境。线上同域部署可以省略。本地端到端运行可通过 HTTPS 隧道将该 Worker 提供给供应商，同时在本地 R2 放入同名素材。
+- 照片为 JPEG/PNG/WebP，每张最大 10 MiB；Images 解码、缩放为最长边 2048 的静态 WebP，并移除元数据。
 
 接口（除带临时令牌的素材内容读取外，都需要会话和调试权限）：
 
 | 接口 | 用途 |
 | --- | --- |
-| `GET /api/templates/24k-magic` | 模板、提示词、当前账号及生成能力 |
+| `GET /api/templates/24k-magic` | 成片规格、当前账号及生成能力 |
 | `POST /api/template-media` | multipart `file` + `kind=photo/video/audio` 上传 |
 | `GET /api/template-media/:id/preview` | 本人素材预览，支持 HEAD/Range |
 | `GET /api/template-media/:id/content?token=…` | 供应商读取素材，单文件令牌 24 小时有效 |
 | `POST /api/template-generations` | 保存输入后调用 SeeAPI，需 UUID `requestId` |
 | `GET /api/template-generations/:id` | 以任务 ID 或 requestId 查询/恢复同一账号任务 |
+| `POST /api/template-generations/:id/retry` | 用户显式重试未完成的部分，携带 UUID `retryId` |
 | `GET /api/template-generations/:id/video` | 本人生成结果，支持 HEAD/Range，`?download=1` 下载 |
 
-生成请求包含 `templateId`、`requestId`、`prompt`、`duration`、`resolution`、`aspectRatio`、`generateAudio`；
-舞者照片使用 `photoId` 或 `photoUrl`，白毯搭档照片使用 `partnerPhotoId` 或 `partnerPhotoUrl`。两张均为必填，按舞者、搭档的顺序传入 SeeAPI 的 `reference_images`。参考视频使用 `referenceVideoId` 或 `referenceVideoUrl`，可选音频使用 `referenceAudioId` 或 `referenceAudioUrl`。
+生成请求包含 `templateId`、`requestId` 和可选的 `resolution`（默认 `720p`）。舞者照片使用 `photoId` 或 `photoUrl`，搭档照片使用 `partnerPhotoId` 或 `partnerPhotoUrl`。两张均为必填，并在两次供应商请求中保持舞者、搭档的顺序。
 API Key 仅用于服务端调用，不返回浏览器。素材与结果在私有 R2 中；临时令牌到期只停止外部读取，不自动删除存储对象。
 
 费用与恢复规则：
@@ -94,7 +87,7 @@ API Key 仅用于服务端调用，不返回浏览器。素材与结果在私有
 - D1 租约防止并发轮询覆盖结果；同一账号最多两个活动任务。页面刷新后从账号隔离的浏览器记录恢复，记录只含任务 ID。
 - 视频成功后分段保存到 R2（最多 100 MiB）。保存失败保留供应商任务，后续查询继续保存，不重新生成。
 - 只有供应商明确返回的 `estimated_credits/consumed_credits/refunded_credits` 才入账展示；缺失字段保留未知，失败不等于免费或已退款。
-- 页面查询间隔 10 秒；关闭页面后不会后台轮询，重新打开后继续。重新生成会创建新付费任务。
+- 页面可查询进度；每两分钟的定时任务也会推进未完成的 v3 任务。每段生成使用独立幂等键。明确失败的生成由用户决定是否重试，已成功保存的片段及自动拼接不会再次提交给供应商。
 - SeeAPI 积分不是未来出售给用户的站内积分。参考视频输入时长也影响成本，详见 [Seedance 2.0 参数与计费](https://www.seeapi.com/docs/seedance-2/reference-to-video/)。
 
 此调试页保留 canonical/描述/OG，但设置 `noindex, nofollow`；完成样片、参考素材和费用规则验收后再开放搜索收录。

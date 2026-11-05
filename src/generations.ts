@@ -1,8 +1,11 @@
 import { Hono } from "hono";
 import type { AppBindings, AppEnv } from "./env";
-import { MediaError, resolveMedia } from "./media";
-import { ProviderError, providerRequest, publicHttpsUrl, type ProviderTask } from "./seeapi";
-import { cruisePrompt, cruisePromptV1, cruiseTemplateVersion } from "./templates";
+import { MediaError } from "./media";
+import { ProviderError, providerRequest, type ProviderTask } from "./seeapi";
+import { cruisePromptV2, cruisePromptV1, cruiseTemplateVersion } from "./templates";
+
+import { createCruisePlan, advanceCruiseJob, hasRetried, prepareCruiseRetry, retryUsesCredits } from "./cruise-jobs";
+import { storeProviderVideo } from "./result-video";
 
 type Job = {
   id: string; user_id: string; request_id: string; request_hash: string;
@@ -24,52 +27,45 @@ generationRoutes.post("/", async (c) => {
   if (!body || typeof body !== "object" || body.templateId !== "24k-magic" || typeof body.requestId !== "string" || !uuid.test(body.requestId)) {
     return c.json({ error: { code: "INVALID_INPUT", message: "A valid template and request ID are required." } }, 400);
   }
-  const duration = body.duration ?? 10;
-  const resolution = body.resolution ?? "720p";
-  const aspectRatio = body.aspectRatio ?? "9:16";
-  const generateAudio = body.generateAudio ?? true;
   const userId = c.get("userId");
   const existing = await findJob(c.env, userId, body.requestId);
-  const legacy = existing?.template_version === 1;
-  const defaultPrompt = legacy ? cruisePromptV1 : cruisePrompt;
-  const prompt = typeof body.prompt === "string" ? body.prompt.trim() : defaultPrompt;
-  if (![5, 10, 15].includes(duration as number) || !["480p", "720p"].includes(resolution as string)
-    || !["9:16", "16:9"].includes(aspectRatio as string) || typeof generateAudio !== "boolean" || !prompt || prompt.length > 6000) {
-    return c.json({ error: { code: "INVALID_INPUT", message: "Check duration, resolution, framing and prompt (maximum 6,000 characters)." } }, 400);
+  const resolution = body.resolution ?? "720p";
+  const portraits = { photoId: body.photoId ?? null, photoUrl: body.photoUrl ?? null,
+    partnerPhotoId: body.partnerPhotoId ?? null, partnerPhotoUrl: body.partnerPhotoUrl ?? null };
+  let normalized;
+  if (existing && existing.template_version < 3) {
+    const prompt = existing.template_version === 1 ? cruisePromptV1 : cruisePromptV2;
+    normalized = {
+      templateId: body.templateId, photoId: portraits.photoId, photoUrl: portraits.photoUrl,
+      partnerPhotoId: body.partnerPhotoId ?? undefined, partnerPhotoUrl: body.partnerPhotoUrl ?? undefined,
+      referenceVideoId: body.referenceVideoId ?? null, referenceVideoUrl: body.referenceVideoUrl ?? null,
+      referenceAudioId: body.referenceAudioId ?? null, referenceAudioUrl: body.referenceAudioUrl ?? null,
+      prompt: typeof body.prompt === "string" ? body.prompt.trim() : prompt, duration: body.duration ?? 10,
+      resolution, aspectRatio: body.aspectRatio ?? "9:16", generateAudio: body.generateAudio ?? true,
+    };
+  } else {
+    const allowed = ["templateId", "requestId", "resolution", ...Object.keys(portraits)];
+    if (Object.keys(body).some(key => !allowed.includes(key)) || (resolution !== "480p" && resolution !== "720p")) {
+      return c.json({ error: { code: "INVALID_INPUT", message: "Use the current template with two portraits and a supported resolution." } }, 400);
+    }
+    normalized = { templateId: body.templateId, ...portraits, resolution };
   }
-  const normalized = {
-    templateId: body.templateId, photoId: body.photoId ?? null, photoUrl: body.photoUrl ?? null,
-    // Omit absent partner fields from the serialized hash for version 1 retries.
-    partnerPhotoId: body.partnerPhotoId ?? undefined, partnerPhotoUrl: body.partnerPhotoUrl ?? undefined,
-    referenceVideoId: body.referenceVideoId ?? null, referenceVideoUrl: body.referenceVideoUrl ?? null,
-    referenceAudioId: body.referenceAudioId ?? null, referenceAudioUrl: body.referenceAudioUrl ?? null,
-    prompt, duration, resolution, aspectRatio, generateAudio,
-  };
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(normalized)));
-  const hash = [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
+  let hash = await requestHash(normalized);
+  if (existing?.template_version === 2 && existing.request_hash !== hash) {
+    // Both the omitted and explicit-null encodings identify the same unselected portrait source.
+    hash = await requestHash({ ...normalized, partnerPhotoId: portraits.partnerPhotoId, partnerPhotoUrl: portraits.partnerPhotoUrl });
+  }
   if (existing) {
     if (existing.request_hash !== hash) return c.json({ error: { code: "REQUEST_CONFLICT", message: "This request ID belongs to different inputs. Keep the original inputs when resuming." } }, 409);
     return c.json({ job: publicJob(await refreshJob(c.env, existing)) });
   }
-  let dancerPhoto: string, partnerPhoto: string, video: string, audio: string | undefined;
+  let providerBody: string;
   try {
-    dancerPhoto = await resolveInput(c.env, userId, "photo", body.photoId, body.photoUrl, "dancer portrait");
-    partnerPhoto = await resolveInput(c.env, userId, "photo", body.partnerPhotoId, body.partnerPhotoUrl, "partner portrait");
-    video = await resolveInput(c.env, userId, "video", body.referenceVideoId,
-      body.referenceVideoUrl || (!body.referenceVideoId ? c.env.TEMPLATE_REFERENCE_VIDEO_URL : undefined));
-    if (body.referenceAudioId || body.referenceAudioUrl) audio = await resolveInput(c.env, userId, "audio", body.referenceAudioId, body.referenceAudioUrl);
+    providerBody = await createCruisePlan(c.env, userId, portraits, resolution as string);
   } catch (error) {
     if (error instanceof MediaError) return c.json({ error: { code: error.code, message: error.message } }, error.status);
-    return c.json({ error: { code: "INVALID_MEDIA", message: error instanceof Error ? error.message : "Check the media inputs." } }, 400);
+    return c.json({ error: { code: "INVALID_MEDIA", message: error instanceof Error ? error.message : "Check both photos." } }, 400);
   }
-  const providerBody = JSON.stringify({
-    model: "seedance-2", endpoint: "reference-to-video", provider: "seeapi",
-    input: {
-      prompt, reference_images: [dancerPhoto, partnerPhoto], reference_video: [video],
-      ...(audio ? { reference_audio: [audio] } : {}),
-      duration_seconds: duration, resolution, aspect_ratio: aspectRatio, generate_audio: generateAudio, nsfw_checker: true,
-    },
-  });
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   const inserted = await c.env.DB.prepare(`INSERT INTO template_generation
@@ -85,7 +81,39 @@ generationRoutes.post("/", async (c) => {
     return c.json({ error: { code: "TASK_LIMIT", message: "Resume your existing tasks before starting another. Two active tasks are allowed during debugging." } }, 429);
   }
   const job = await findJob(c.env, userId, id);
-  return c.json({ job: publicJob(await submitJob(c.env, job!)) }, 202);
+  return c.json({ job: publicJob(await processClaimedCruiseJob(c.env, job!)) }, 202);
+});
+
+generationRoutes.post("/:id/retry", async (c) => {
+  if (!c.env.SEEAPI_API_KEY) return c.json({ error: { code: "NOT_CONFIGURED", message: "Video generation is not configured." } }, 503);
+  let retryId: unknown;
+  try { retryId = (await c.req.json()).retryId; } catch { /* Validated below. */ }
+  if (typeof retryId !== "string" || !uuid.test(retryId)) return c.json({ error: { code: "INVALID_INPUT", message: "A valid retry ID is required." } }, 400);
+  const job = await findJob(c.env, c.get("userId"), c.req.param("id"));
+  if (!job) return c.json({ error: { code: "NOT_FOUND", message: "This task was not found in your account." } }, 404);
+  if (job.template_version >= 3 && hasRetried(job.provider_body, retryId)) return c.json({ job: publicJob(job) });
+  if (job.template_version !== 3 || job.status !== "failed") {
+    return c.json({ error: { code: "CANNOT_RETRY", message: "This generation has no failed part to retry." } }, 409);
+  }
+  let plan: string;
+  try {
+    plan = await prepareCruiseRetry(c.env, job.user_id, job.provider_body, retryId);
+  } catch (error) {
+    if (error instanceof MediaError) return c.json({ error: { code: error.code, message: error.message } }, error.status);
+    return c.json({ error: { code: "INVALID_MEDIA", message: "Your photos could not be prepared." } }, 400);
+  }
+  const lease = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const changed = await c.env.DB.prepare(`UPDATE template_generation SET status='submitting',provider_body=?,error=NULL,lease_id=?,lease_until=?,updated_at=?
+    WHERE id=? AND status='failed' AND provider_body=? AND (lease_until IS NULL OR lease_until<?)
+    AND (SELECT COUNT(*) FROM template_generation WHERE user_id=? AND status IN ('submitting','submission_unknown','processing')) < 2`)
+    .bind(plan, lease, new Date(Date.now()+120_000).toISOString(), now, job.id, job.provider_body, now, job.user_id).run();
+  if (!changed.meta.changes) {
+    const current = (await findJob(c.env, job.user_id, job.id))!;
+    if (hasRetried(current.provider_body, retryId)) return c.json({ job: publicJob(current) });
+    return c.json({ error: { code: "RETRY_BUSY", message: "Check your active tasks and retry when they are ready." } }, 409);
+  }
+  return c.json({ job: publicJob(await processClaimedCruiseJob(c.env, { ...job, provider_body: plan, lease_id: lease })) }, 202);
 });
 
 generationRoutes.get("/:id", async (c) => {
@@ -127,15 +155,9 @@ generationRoutes.on(["GET", "HEAD"], "/:id/video", async (c) => {
   return new Response(c.req.method === "HEAD" ? null : object.body, { status, headers });
 });
 
-async function resolveInput(env: AppEnv, userId: string, kind: "photo" | "video" | "audio", id: unknown, url: unknown, label = "reference " + kind) {
-  if (id && url) throw new Error(`Choose an uploaded ${kind} or a URL, not both.`);
-  if (typeof id === "string") {
-    const asset = await resolveMedia(env, userId, id);
-    if (asset.kind !== kind) throw new Error(`The selected asset is not a ${kind}.`);
-    return asset.url;
-  }
-  if (!url) throw new Error(`A ${label} is required.`);
-  return publicHttpsUrl(url);
+async function requestHash(input: unknown) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(input)));
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
 async function findJob(env: AppEnv, userId: string, id: string) {
@@ -146,6 +168,8 @@ function publicJob(job: Job) {
   return {
     id: job.id, requestId: job.request_id, status: job.status, providerTaskId: job.provider_task_id,
     estimatedCredits: job.estimated_credits, consumedCredits: job.consumed_credits, refundedCredits: job.refunded_credits,
+    canRetry: job.template_version >= 3 && job.status === "failed",
+    ...(job.template_version >= 3 && job.status === "failed" ? { retryUsesCredits: retryUsesCredits(job.provider_body) } : {}),
     videoUrl: job.result_object_key ? `/api/template-generations/${job.id}/video` : null,
     error: job.error, createdAt: job.created_at, updatedAt: job.updated_at,
   };
@@ -169,7 +193,7 @@ async function submitJob(env: AppEnv, job: Job): Promise<Job> {
 async function refreshJob(env: AppEnv, job: Job): Promise<Job> {
   if (terminal.has(job.status)) return job;
   const elapsed = Date.now() - Date.parse(job.updated_at);
-  const minDelay = job.provider_task_id ? 8_000 : 45_000;
+  const minDelay = job.template_version >= 3 || job.provider_task_id ? 8_000 : 45_000;
   if (elapsed < minDelay) return job;
   const now = new Date().toISOString();
   const leaseId = crypto.randomUUID();
@@ -178,6 +202,7 @@ async function refreshJob(env: AppEnv, job: Job): Promise<Job> {
     .bind(now, leaseId, new Date(Date.now() + 120_000).toISOString(), job.id, job.updated_at, now).run();
   if (!claimed.meta.changes) return (await findJob(env, job.user_id, job.id))!;
   job = { ...job, lease_id: leaseId };
+  if (job.template_version >= 3) return processClaimedCruiseJob(env, job);
   if (!job.provider_task_id) return submitJob(env, job);
   try {
     const task = await providerRequest(env, `/v1/generations/${encodeURIComponent(job.provider_task_id)}`);
@@ -188,6 +213,25 @@ async function refreshJob(env: AppEnv, job: Job): Promise<Job> {
     return (await findJob(env, job.user_id, job.id))!;
   } finally {
     await releaseLease(env, job);
+  }
+}
+
+async function processClaimedCruiseJob(env: AppEnv, job: Job): Promise<Job> {
+  try {
+    await advanceCruiseJob(env, job);
+  } finally {
+    await releaseLease(env, job);
+  }
+  return (await findJob(env, job.user_id, job.id))!;
+}
+
+export async function reconcileCruiseJobs(env: AppEnv) {
+  const now = new Date().toISOString();
+  const jobs = await env.DB.prepare(`SELECT * FROM template_generation WHERE template_version=3
+    AND status IN ('submitting','submission_unknown','processing') AND (lease_until IS NULL OR lease_until<?)
+    AND updated_at<? ORDER BY updated_at LIMIT 5`).bind(now, new Date(Date.now()-8000).toISOString()).all<Job>();
+  for (const job of jobs.results) {
+    try { await refreshJob(env, job); } catch { console.error("Template reconciliation will retry"); }
   }
 }
 
@@ -208,13 +252,7 @@ async function applyProviderTask(env: AppEnv, job: Job, task: ProviderTask): Pro
     try {
       if (!asset?.url) throw new Error("No video asset");
       const key = `results/${job.user_id}/${job.id}/video.mp4`;
-      if (!await env.MEDIA.head(key)) {
-        const response = await fetch(publicHttpsUrl(asset.url), { redirect: "error", signal: AbortSignal.timeout(60_000) });
-        if (!response.ok || !response.body || Number(response.headers.get("content-length") || 0) > 100 * 1024 * 1024) throw new Error("Video retrieval failed");
-        const type = response.headers.get("content-type")?.split(";")[0];
-        if (type && !["video/mp4", "application/octet-stream"].includes(type)) throw new Error("Unexpected video type");
-        await saveVideo(env, key, response.body);
-      }
+      await storeProviderVideo(env, key, asset.url);
       objectKey = key;
     } catch {
       status = "processing";
@@ -227,40 +265,4 @@ async function applyProviderTask(env: AppEnv, job: Job, task: ProviderTask): Pro
     refunded_credits=COALESCE(?,refunded_credits),result_object_key=?,error=?,updated_at=? WHERE id=? AND lease_id=?`)
     .bind(task.id, status, credit(task.estimated_credits), credit(task.consumed_credits), credit(task.refunded_credits), objectKey, error, new Date().toISOString(), job.id, job.lease_id).run();
   return (await findJob(env, job.user_id, job.id))!;
-}
-
-async function saveVideo(env: AppEnv, key: string, stream: ReadableStream<Uint8Array>) {
-  // R2 requires known-length parts; keep memory bounded even without Content-Length.
-  const upload = await env.MEDIA.createMultipartUpload(key, { httpMetadata: { contentType: "video/mp4" } });
-  const reader = stream.getReader();
-  const parts: R2UploadedPart[] = [];
-  const buffer = new Uint8Array(5 * 1024 * 1024);
-  let used = 0, total = 0;
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > 100 * 1024 * 1024) throw new Error("Video exceeds storage limit");
-      let offset = 0;
-      while (offset < value.byteLength) {
-        const size = Math.min(buffer.length - used, value.byteLength - offset);
-        buffer.set(value.subarray(offset, offset + size), used);
-        used += size;
-        offset += size;
-        if (used === buffer.length) {
-          parts.push(await upload.uploadPart(parts.length + 1, buffer));
-          used = 0;
-        }
-      }
-    }
-    if (!total) throw new Error("Empty video result");
-    if (used) parts.push(await upload.uploadPart(parts.length + 1, buffer.subarray(0, used)));
-    await upload.complete(parts);
-  } catch (error) {
-    await upload.abort();
-    throw error;
-  } finally {
-    await reader.cancel().catch(() => {});
-  }
 }

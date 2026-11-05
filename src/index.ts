@@ -1,11 +1,12 @@
 import { Hono, type Context } from "hono";
 import { createAuth, type AuthEnv } from "./auth";
-import { canDebugTemplates, type AppBindings } from "./env";
+import { canDebugTemplates, type AppBindings, type AppEnv } from "./env";
 import { templateRoutes } from "./templates";
-import { generationRoutes } from "./generations";
+import { generationRoutes, reconcileCruiseJobs } from "./generations";
 import { mediaRoutes } from "./media";
+import { fixedMediaPath, fixedMediaRoutes } from "./template-assets";
 
-const app = new Hono<AppBindings>();
+export const app = new Hono<AppBindings>();
 
 app.get("/api/health", (c) => c.json({ status: "ok" }));
 
@@ -24,6 +25,9 @@ app.use("/api/auth/*", async (c, next) => {
   await next();
 });
 app.all("/api/auth/*", (c) => createAuth(c.env).handler(c.req.raw));
+
+// SeeAPI reads these two template clips with a time-limited signature.
+app.route(fixedMediaPath, fixedMediaRoutes);
 
 app.use("/api/*", async (c, next) => {
   const path = c.req.path;
@@ -75,4 +79,9 @@ app.onError((error, c) => {
   return c.json({ error: { code: "INTERNAL_ERROR", message: "Unable to complete the request." } }, 500);
 });
 
-export default app;
+export default {
+  fetch: app.fetch,
+  async scheduled(_event: ScheduledController, env: AppEnv) {
+    await reconcileCruiseJobs(env);
+  },
+} satisfies ExportedHandler<AppEnv>;

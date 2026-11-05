@@ -20,7 +20,8 @@
   },
   "dependencies": {
     "better-auth": "1.7.14",
-    "hono": "4.13.16"
+    "hono": "4.13.16",
+    "mediabunny": "1.65.2"
   },
   "devDependencies": {
     "wrangler": "4.156.0",

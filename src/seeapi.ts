@@ -27,7 +27,7 @@ export async function providerRequest(env: AppEnv, path: string, options: { body
   try {
     response = await fetch(new URL(path, base), {
       method: options.body ? "POST" : "GET", headers, body: options.body,
-      redirect: "error", signal: AbortSignal.timeout(30_000),
+      redirect: "manual", signal: AbortSignal.timeout(30_000),
     });
   } catch {
     throw new ProviderError(502, true, "The provider has not confirmed this request. Resume this task instead of starting another.");

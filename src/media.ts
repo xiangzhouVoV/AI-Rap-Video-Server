@@ -237,7 +237,7 @@ async function normalizePhoto(env: MediaEnv, file: File): Promise<Blob> {
   }
 }
 
-async function serveMedia(c: Context<MediaContext>, row: MediaRow): Promise<Response> {
+export async function serveMedia(c: Context<MediaContext>, row: Pick<MediaRow, "object_key" | "content_type" | "byte_size">): Promise<Response> {
   const headers = new Headers({
     "Content-Type": row.content_type,
     "Cache-Control": "private, no-store",

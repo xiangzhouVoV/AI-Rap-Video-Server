@@ -6,7 +6,10 @@ import { join, resolve } from "node:path";
 import { after, before, beforeEach, describe, it } from "node:test";
 import { getPlatformProxy } from "wrangler";
 import { createAuth, type AuthEnv } from "../src/auth";
-import app from "../src/index";
+import { app } from "../src/index";
+import { reconcileCruiseJobs } from "../src/generations";
+import type { AppEnv } from "../src/env";
+import { cruiseAudioKey, cruiseClipKeys, resolveCruiseAssets } from "../src/template-assets";
 
 const origin = "https://auth.example.test";
 let env: AuthEnv;
@@ -115,46 +118,124 @@ describe("authentication against local D1", { concurrency: false }, () => {
     });
   });
 
-  it("sends both portraits in role order and ties the partner to the request ID", async (t) => {
+  it("keeps the two scene instructions private and resumes or retries only unfinished work", async (t) => {
     const { user, cookie } = await createSession();
-    const bindings = { ...env, TEMPLATE_DEBUG_EMAILS: user.email, SEEAPI_API_KEY: "test-only",
+    const bindings = { ...(env as AppEnv), TEMPLATE_DEBUG_EMAILS: user.email, SEEAPI_API_KEY: "test-only",
       SEEAPI_API_BASE_URL: "https://provider.example.test", MEDIA_PUBLIC_BASE_URL: origin };
-    const submit = (body: Record<string, unknown>) => request("/api/template-generations", {
-      method: "POST", headers: { Origin: origin, Cookie: cookie, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+    const headers = { Origin: origin, Cookie: cookie, "Content-Type": "application/json" };
+    const submit = (body: Record<string, unknown>, suffix = "") => request("/api/template-generations" + suffix, {
+      method: "POST", headers, body: JSON.stringify(body),
     }, bindings);
-    const requestBody = { requestId: crypto.randomUUID(), templateId: "24k-magic",
-      photoUrl: "https://assets.example.test/dancer.jpg", referenceVideoUrl: "https://assets.example.test/reference.mp4" };
     const partnerPhotoId = crypto.randomUUID();
     const token = "a".repeat(64);
     await env.DB.prepare(`INSERT INTO template_media (id,user_id,object_key,kind,content_type,byte_size,access_token,created_at)
       VALUES (?,?,?,'photo','image/webp',100,?,?)`).bind(partnerPhotoId, user.id, "partner", token, new Date().toISOString()).run();
+    const body = { requestId: crypto.randomUUID(), templateId: "24k-magic",
+      photoUrl: "https://assets.example.test/dancer.jpg", partnerPhotoId };
+    const submitted: {body: string; key: string}[] = [];
+    let openingPolls = 0;
+    const mediaUrl = "https://assets.example.test/result.mp4";
+    const providerUrl = "https://provider.example.test/v1/generations";
     const realFetch = globalThis.fetch;
-    const submitted: string[][] = [];
     t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
-      if (String(input) !== "https://provider.example.test/v1/generations") return realFetch(input, init);
-      submitted.push(JSON.parse(String(init?.body)).input.reference_images);
-      return Response.json({ generation: { id: "test-generation", status: "processing" } });
+      const url = String(input);
+      if (url === mediaUrl) return new Response(new Uint8Array([1, 2]), { headers: { "Content-Type": "video/mp4" } });
+      if (url === providerUrl && init?.method === "POST") {
+        const key = new Headers(init.headers).get("Idempotency-Key")!;
+        submitted.push({body: String(init.body), key});
+        if (key.endsWith("finale-1") && submitted.length === 2) return new Response(null, { status: 502 });
+        return Response.json({ generation: { id: key, status: key.endsWith("finale-1") ? "failed" : "processing", consumed_credits: 1 } });
+      }
+      if (url.startsWith(providerUrl + "/")) {
+        if (url.endsWith("opening-1") && openingPolls++ === 0) {
+          return Response.json({ generation: { id: url.split("/").pop(), status: "queued" } });
+        }
+        return Response.json({ generation: { id: url.split("/").pop(), status: "succeeded", consumed_credits: 3,
+          result: { assets: [{ type: "video", url: mediaUrl }] } } });
+      }
+      return realFetch(input, init);
     });
 
-    assert.equal((await submit(requestBody)).status, 400);
-    const paired = { partnerPhotoId, ...requestBody };
-    assert.equal((await submit(paired)).status, 202);
-    assert.equal((await submit(paired)).status, 200);
-    assert.equal((await submit({ ...requestBody, partnerPhotoUrl: "https://assets.example.test/other.jpg" })).status, 409);
-    assert.deepEqual(submitted, [[requestBody.photoUrl, `${origin}/api/template-media/${partnerPhotoId}/content?token=${token}`]]);
-    assert.equal(await env.DB.prepare("SELECT template_version FROM template_generation WHERE request_id=?")
-      .bind(requestBody.requestId).first("template_version"), 2);
+    const config = await (await request("/api/templates/24k-magic", { headers }, bindings)).json() as { template: object };
+    assert.deepEqual(Object.keys(config.template).sort(), ["aspectRatio", "duration", "id", "name", "resolution", "version"]);
+    assert.equal((await submit({ ...body, partnerPhotoId: undefined })).status, 400);
+    for (const override of ["prompt", "referenceVideoId", "referenceVideoUrl", "referenceAudioUrl", "duration", "aspectRatio", "generateAudio"]) {
+      assert.equal((await submit({ ...body, [override]: "override" })).status, 400);
+    }
+    assert.equal((await submit(body)).status, 503);
+    assert.equal(submitted.length, 0);
+    for (const key of [cruiseClipKeys.opening, cruiseClipKeys.finale, cruiseAudioKey]) await bindings.MEDIA.put(key, "fixture");
+    const response = await submit(body);
+    assert.equal(response.status, 202);
+    type Public = { job: { id: string; status: string; canRetry: boolean; retryUsesCredits?: boolean; consumedCredits: number; videoUrl: string | null } };
+    const { job } = await response.json() as Public;
+    assert.equal(job.status, "submission_unknown");
+    assert.equal(job.videoUrl, null);
+    assert.equal((await submit(body)).status, 200);
+    assert.equal((await submit({ ...body, partnerPhotoId: undefined, partnerPhotoUrl: "https://assets.example.test/other.jpg" })).status, 409);
+    assert.equal(submitted.length, 2);
+    for (const [index, entry] of submitted.entries()) {
+      const input = JSON.parse(entry.body).input;
+      assert.deepEqual(input.reference_images, [body.photoUrl, `${origin}/api/template-media/${partnerPhotoId}/content?token=${token}`]);
+      assert.equal(new URL(input.reference_video[0]).pathname.endsWith(index ? "/finale" : "/opening"), true);
+      assert.equal(input.generate_audio, false);
+      assert.equal(input.aspect_ratio, "4:3");
+      assert.equal(input.duration_seconds, 15);
+    }
+    const lookup = async () => (await (await request("/api/template-generations/" + job.id, { headers }, bindings)).json() as Public).job;
+    const advance = async () => {
+      await env.DB.prepare("UPDATE template_generation SET updated_at=? WHERE id=?").bind("2001-01-01T00:00:00.000Z", job.id).run();
+      await reconcileCruiseJobs(bindings);
+      return lookup();
+    };
+    assert.equal((await advance()).status, "processing", "a provider-queued sibling must keep its task ID and finish");
+    const partial = await advance();
+    assert.equal(partial.status, "failed");
+    assert.equal(partial.canRetry, true);
+    assert.equal(partial.consumedCredits, 4);
+    assert.equal(partial.retryUsesCredits, true);
+    assert.deepEqual(submitted[1], submitted[2], "uncertain submission must replay identical provider request");
+    const retryId = crypto.randomUUID();
+    const retry = () => submit({retryId}, "/" + job.id + "/retry");
+    assert.equal((await retry()).status, 202);
+    assert.equal((await retry()).status, 200);
+    assert.equal(submitted.length, 4);
+    assert.ok(submitted[3].key.endsWith("finale-2"));
+    // These dummy media bytes cannot be assembled. Saving both parts alone must not publish the job.
+    assert.equal((await advance()).status, "processing");
+    assert.equal((await lookup()).videoUrl, null);
+    await advance();
+    const waiting = await advance();
+    assert.equal(waiting.status, "failed");
+    assert.equal(waiting.retryUsesCredits, false);
+    // Simulate a worker that completed the R2 write and lost its lease before the final database update.
+    await bindings.MEDIA.put(`results/${user.id}/${job.id}/video.mp4`, "already assembled");
+    const finishing = await submit({retryId: crypto.randomUUID()}, "/" + job.id + "/retry");
+    assert.equal(finishing.status, 202);
+    const complete = (await finishing.json() as Public).job;
+    assert.equal(complete.status, "succeeded");
+    assert.ok(complete.videoUrl);
+    assert.equal(complete.consumedCredits, 7);
+    assert.equal(submitted.length, 4);
 
-    // A stored version 1 job using the original default prompt can still be resumed.
-    const legacyRequest = { ...requestBody, requestId: crypto.randomUUID() };
     const now = new Date().toISOString();
+    const legacyRequest = { requestId: crypto.randomUUID(), templateId: "24k-magic",
+      photoUrl: body.photoUrl, referenceVideoUrl: "https://assets.example.test/reference.mp4" };
     await env.DB.prepare(`INSERT INTO template_generation
       (id,user_id,request_id,request_hash,template_id,template_version,provider_body,status,created_at,updated_at)
       VALUES (?,?,?,?,'24k-magic',1,'{}','canceled',?,?)`)
       .bind(crypto.randomUUID(), user.id, legacyRequest.requestId, "14e4005f88800713ef71761d6c799b854e18b09e9038e955a9d86961543247c3", now, now).run();
     assert.equal((await submit(legacyRequest)).status, 200);
     assert.equal((await submit({ ...legacyRequest, partnerPhotoId })).status, 409);
+    for (const hash of ["dfa80a9b171d53e6e3d7310d1c7a38b66f1b3ed78369c0c5b16ad99ef40f1379", "75e2ebfa3e1fdb7e6d4ef5627fd7a51e7d45cd8d6b4e68a0c6399090f2b57128"]) {
+      const v2Request = { ...legacyRequest, requestId: crypto.randomUUID(), partnerPhotoUrl: "https://assets.example.test/partner.jpg" };
+      await env.DB.prepare(`INSERT INTO template_generation
+        (id,user_id,request_id,request_hash,template_id,template_version,provider_body,status,created_at,updated_at)
+        VALUES (?,?,?,?,'24k-magic',2,'{}','canceled',?,?)`)
+        .bind(crypto.randomUUID(), user.id, v2Request.requestId, hash, now, now).run();
+      assert.equal((await submit(v2Request)).status, 200);
+      assert.equal((await submit({...v2Request, partnerPhotoUrl: "https://assets.example.test/changed.jpg"})).status, 409);
+    }
   });
 
   it("rejects a forged session cookie", async () => {
@@ -339,5 +420,33 @@ describe("authentication against local D1", { concurrency: false }, () => {
     assert.equal(stored, null);
     const afterLogout = await request("/api/me", { headers: { Cookie: cookie } });
     assert.equal(afterLogout.status, 401);
+  });
+
+  it("serves only the signed template clip, including provider HEAD and byte-range requests", async (t) => {
+    const bindings = env as AppEnv;
+    await bindings.MEDIA.put(cruiseClipKeys.opening, "opening");
+    await bindings.MEDIA.put(cruiseClipKeys.finale, "finale");
+    await bindings.MEDIA.delete(cruiseAudioKey);
+    await assert.rejects(resolveCruiseAssets(bindings), { code: "TEMPLATE_UNAVAILABLE" });
+    await bindings.MEDIA.put(cruiseAudioKey, "private audio");
+
+    const signed = await resolveCruiseAssets(bindings);
+    const clip = new URL(signed.opening);
+    const response = await request(clip.pathname + clip.search, { headers: { Range: "bytes=2-4" } });
+    assert.equal(response.status, 206);
+    assert.equal(response.headers.get("content-range"), "bytes 2-4/7");
+    assert.equal(await response.text(), "eni");
+    const head = await request(clip.pathname + clip.search, { method: "HEAD" });
+    assert.equal(head.status, 200);
+    assert.equal(head.headers.get("content-length"), "7");
+    assert.equal(await head.text(), "");
+    assert.equal((await request(clip.pathname + clip.search, { headers: { Range: "bytes=7-" } })).status, 416);
+
+    assert.equal((await request(clip.pathname)).status, 404);
+    assert.equal((await request(new URL(signed.finale).pathname + clip.search)).status, 404);
+    assert.equal((await request(clip.pathname.replace("opening", "audio") + clip.search)).status, 404);
+    const expiry = Number(clip.searchParams.get("expires")) * 1000;
+    t.mock.method(Date, "now", () => expiry);
+    assert.equal((await request(clip.pathname + clip.search)).status, 404);
   });
 });

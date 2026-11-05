@@ -13,10 +13,7 @@ SEEAPI_API_KEY=
 
 # Optional public HTTPS origin that reaches THIS Worker's media routes and storage.
 # Localhost uploads can be previewed, but SeeAPI cannot read them without this origin.
-# For local generation without a tunnel, use direct HTTPS media URLs in the template lab.
+# Use a tunnel to this Worker for local end-to-end tests with the fixed template.
 MEDIA_PUBLIC_BASE_URL=
 # Required outside localhost: comma-separated Google account emails allowed to spend provider credits.
 TEMPLATE_DEBUG_EMAILS=
-# Optional default reference MP4/MOV URL (2–15s, 480p/720p, 24–60fps).
-# Use a direct HTTPS file URL under your control, not a TikTok webpage.
-TEMPLATE_REFERENCE_VIDEO_URL=

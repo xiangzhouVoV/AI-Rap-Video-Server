@@ -5,7 +5,6 @@ export type AppEnv = AuthEnv & Pick<Env, "MEDIA" | "IMAGES"> & {
   SEEAPI_API_BASE_URL?: string;
   MEDIA_PUBLIC_BASE_URL?: string;
   TEMPLATE_DEBUG_EMAILS?: string;
-  TEMPLATE_REFERENCE_VIDEO_URL?: string;
 };
 
 export type AppBindings = { Bindings: AppEnv; Variables: { userId: string } };
