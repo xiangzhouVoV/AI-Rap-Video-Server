@@ -4,7 +4,7 @@ import { MediaError } from "./media";
 import { ProviderError, providerRequest, type ProviderTask } from "./seeapi";
 import { cruisePromptV2, cruisePromptV1, cruiseTemplateVersion } from "./templates";
 
-import { createCruisePlan, advanceCruiseJob, hasRetried, prepareCruiseRetry, retryUsesCredits } from "./cruise-jobs";
+import { createCruisePlan, advanceCruiseJob, hasRetried, prepareCruiseRetry, cruiseRetryOptions } from "./cruise-jobs";
 import { storeProviderVideo } from "./result-video";
 
 type Job = {
@@ -57,7 +57,7 @@ generationRoutes.post("/", async (c) => {
   }
   if (existing) {
     if (existing.request_hash !== hash) return c.json({ error: { code: "REQUEST_CONFLICT", message: "This request ID belongs to different inputs. Keep the original inputs when resuming." } }, 409);
-    return c.json({ job: publicJob(await refreshJob(c.env, existing)) });
+    return c.json({ job: publicJob(c.env, await refreshJob(c.env, existing)) });
   }
   let providerBody: string;
   try {
@@ -76,12 +76,12 @@ generationRoutes.post("/", async (c) => {
     .bind(id, userId, body.requestId, hash, "24k-magic", cruiseTemplateVersion, providerBody, now, now, id, new Date(Date.now() + 120_000).toISOString(), userId).run();
   if (!inserted.meta.changes) {
     const raced = await findJob(c.env, userId, body.requestId);
-    if (raced && raced.request_hash === hash) return c.json({ job: publicJob(raced) });
+    if (raced && raced.request_hash === hash) return c.json({ job: publicJob(c.env, raced) });
     if (raced) return c.json({ error: { code: "REQUEST_CONFLICT", message: "This request ID belongs to different inputs." } }, 409);
     return c.json({ error: { code: "TASK_LIMIT", message: "Resume your existing tasks before starting another. Two active tasks are allowed during debugging." } }, 429);
   }
   const job = await findJob(c.env, userId, id);
-  return c.json({ job: publicJob(await processClaimedCruiseJob(c.env, job!)) }, 202);
+  return c.json({ job: publicJob(c.env, await processClaimedCruiseJob(c.env, job!)) }, 202);
 });
 
 generationRoutes.post("/:id/retry", async (c) => {
@@ -91,7 +91,7 @@ generationRoutes.post("/:id/retry", async (c) => {
   if (typeof retryId !== "string" || !uuid.test(retryId)) return c.json({ error: { code: "INVALID_INPUT", message: "A valid retry ID is required." } }, 400);
   const job = await findJob(c.env, c.get("userId"), c.req.param("id"));
   if (!job) return c.json({ error: { code: "NOT_FOUND", message: "This task was not found in your account." } }, 404);
-  if (job.template_version >= 3 && hasRetried(job.provider_body, retryId)) return c.json({ job: publicJob(job) });
+  if (job.template_version >= 3 && hasRetried(job.provider_body, retryId)) return c.json({ job: publicJob(c.env, job) });
   if (job.template_version !== 3 || job.status !== "failed") {
     return c.json({ error: { code: "CANNOT_RETRY", message: "This generation has no failed part to retry." } }, 409);
   }
@@ -110,16 +110,16 @@ generationRoutes.post("/:id/retry", async (c) => {
     .bind(plan, lease, new Date(Date.now()+120_000).toISOString(), now, job.id, job.provider_body, now, job.user_id).run();
   if (!changed.meta.changes) {
     const current = (await findJob(c.env, job.user_id, job.id))!;
-    if (hasRetried(current.provider_body, retryId)) return c.json({ job: publicJob(current) });
+    if (hasRetried(current.provider_body, retryId)) return c.json({ job: publicJob(c.env, current) });
     return c.json({ error: { code: "RETRY_BUSY", message: "Check your active tasks and retry when they are ready." } }, 409);
   }
-  return c.json({ job: publicJob(await processClaimedCruiseJob(c.env, { ...job, provider_body: plan, lease_id: lease })) }, 202);
+  return c.json({ job: publicJob(c.env, await processClaimedCruiseJob(c.env, { ...job, provider_body: plan, lease_id: lease })) }, 202);
 });
 
 generationRoutes.get("/:id", async (c) => {
   const job = await findJob(c.env, c.get("userId"), c.req.param("id"));
   if (!job) return c.json({ error: { code: "NOT_FOUND", message: "This task was not found in your account." } }, 404);
-  return c.json({ job: publicJob(await refreshJob(c.env, job)) });
+  return c.json({ job: publicJob(c.env, await refreshJob(c.env, job)) });
 });
 
 generationRoutes.on(["GET", "HEAD"], "/:id/video", async (c) => {
@@ -164,14 +164,13 @@ async function findJob(env: AppEnv, userId: string, id: string) {
   return env.DB.prepare("SELECT * FROM template_generation WHERE user_id=? AND (id=? OR request_id=?)").bind(userId, id, id).first<Job>();
 }
 
-function publicJob(job: Job) {
+function publicJob(env: AppEnv, job: Job) {
   return {
     id: job.id, requestId: job.request_id, status: job.status, providerTaskId: job.provider_task_id,
     estimatedCredits: job.estimated_credits, consumedCredits: job.consumed_credits, refundedCredits: job.refunded_credits,
-    canRetry: job.template_version >= 3 && job.status === "failed",
-    ...(job.template_version >= 3 && job.status === "failed" ? { retryUsesCredits: retryUsesCredits(job.provider_body) } : {}),
     videoUrl: job.result_object_key ? `/api/template-generations/${job.id}/video` : null,
     error: job.error, createdAt: job.created_at, updatedAt: job.updated_at,
+    ...(job.template_version === 3 && job.status === "failed" ? cruiseRetryOptions(env, job.provider_body) : { canRetry: false }),
   };
 }
 

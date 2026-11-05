@@ -120,7 +120,7 @@ describe("authentication against local D1", { concurrency: false }, () => {
 
   it("keeps the two scene instructions private and resumes or retries only unfinished work", async (t) => {
     const { user, cookie } = await createSession();
-    const bindings = { ...(env as AppEnv), TEMPLATE_DEBUG_EMAILS: user.email, SEEAPI_API_KEY: "test-only",
+    const bindings = { ...(env as AppEnv), CRUISE_PAUSED_CLIP_KEY: "", TEMPLATE_DEBUG_EMAILS: user.email, SEEAPI_API_KEY: "test-only",
       SEEAPI_API_BASE_URL: "https://provider.example.test", MEDIA_PUBLIC_BASE_URL: origin };
     const headers = { Origin: origin, Cookie: cookie, "Content-Type": "application/json" };
     const submit = (body: Record<string, unknown>, suffix = "") => request("/api/template-generations" + suffix, {
@@ -202,6 +202,16 @@ describe("authentication against local D1", { concurrency: false }, () => {
     assert.deepEqual(submitted[1], submitted[2], "uncertain submission must replay identical provider request");
     const retryId = crypto.randomUUID();
     const retry = () => submit({retryId}, "/" + job.id + "/retry");
+    bindings.CRUISE_PAUSED_CLIP_KEY = cruiseClipKeys.finale;
+    assert.equal((await lookup()).canRetry, false);
+    assert.equal((await retry()).status, 503);
+    const newRequest = await submit({...body, requestId: crypto.randomUUID()});
+    assert.equal(newRequest.status, 503);
+    assert.equal((await newRequest.json() as {error: {code: string}}).error.code, "TEMPLATE_PAUSED");
+    assert.equal(submitted.length, 3);
+    // The held opening is already saved. The missing finale can still be retried.
+    bindings.CRUISE_PAUSED_CLIP_KEY = cruiseClipKeys.opening;
+    assert.equal((await lookup()).canRetry, true);
     assert.equal((await retry()).status, 202);
     assert.equal((await retry()).status, 200);
     assert.equal(submitted.length, 4);

@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
 import type { AppEnv } from "../src/env";
-import { classifyInputFailure, ProviderError, providerRequest } from "../src/seeapi";
+import { cruiseRetryOptions, prepareCruiseRetry } from "../src/cruise-jobs";
+import { classifyInputFailure, providerFailure, ProviderError, providerRequest } from "../src/seeapi";
+import { currentCruiseClipPath } from "../src/template-assets";
 
 it("distinguishes video and photo validation without exposing the provider response", async (t) => {
   const detail = "The input video must contain at least 407696 pixels per frame (width multiplied by height).";
@@ -18,4 +20,45 @@ it("distinguishes video and photo validation without exposing the provider respo
     (error: unknown) => error instanceof ProviderError && !error.uncertain && error.failure === "template_video_resolution"
       && !error.message.includes("secret"),
   );
+});
+
+it("recognizes policy failures in generation envelopes, direct tasks and HTTP errors", async (t) => {
+  const detail = "The input video was blocked because it may contain a real person. Remove or replace this input, or use a verified authorized portrait asset. Credits have been refunded.";
+  const error = { code: "CONTENT_POLICY_VIOLATION", message: detail };
+  const task = { id: "task-opening", status: "failed", consumed_credits: 0, error };
+  const responses = [Response.json({ generation: task }), Response.json(task), Response.json({ error }, { status: 403 })];
+  t.mock.method(globalThis, "fetch", async () => responses.shift()!);
+  const env = { SEEAPI_API_KEY: "fixture" } as AppEnv;
+  for (let i = 0; i < 2; i++) {
+    const result = await providerRequest(env, "/v1/generations/task-opening");
+    assert.equal(providerFailure(result), "template_video_policy");
+    assert.equal(result.consumed_credits, 0);
+  }
+  await assert.rejects(() => providerRequest(env, "/v1/generations", { body: "{}" }),
+    (cause: unknown) => cause instanceof ProviderError && cause.failure === "template_video_policy");
+  assert.equal(classifyInputFailure(error.code, "The input image was blocked because it may contain a real person."), "photo_policy");
+  assert.equal(classifyInputFailure(error.code, "The output video was blocked."), "content_policy");
+});
+
+it("reuses a saved finale and only retries a rejected opening after replacing the reference", async () => {
+  const env = {
+    BETTER_AUTH_URL: "https://app.example.test", BETTER_AUTH_SECRET: "test-only-signing-secret-with-more-than-32-bytes",
+    MEDIA: { head: async () => ({ size: 1 }) },
+  } as unknown as AppEnv;
+  const partBody = (path: string) => JSON.stringify({input: {reference_video: ["https://app.example.test" + path + "?expires=old&signature=old"]}});
+  const opening = { scene: "opening", body: partBody(currentCruiseClipPath("opening")), status: "failed", attempt: 2,
+    taskId: "attempt-two", previous: [{ consumed_credits: 0 }], credits: { consumed_credits: 0 }, failure: "template_video_policy" };
+  const finale = { scene: "finale", status: "succeeded", result: "saved/finale.mp4", credits: { consumed_credits: 448 }, previous: [], attempt: 1 };
+  const plan = { parts: [opening, finale], resolution: "480p", portraits: { photoUrl: "https://assets.example.test/a.jpg",
+    partnerPhotoUrl: "https://assets.example.test/b.jpg" }, retries: [] };
+  const before = JSON.stringify(plan);
+  assert.equal(cruiseRetryOptions(env, before).canRetry, false);
+  await assert.rejects(() => prepareCruiseRetry(env, "fixture", before, "retry"), { code: "TEMPLATE_PAUSED" });
+  opening.body = partBody("/api/template-media/fixed/24k-magic/v3/opening");
+  const replaced = JSON.stringify(plan);
+  assert.equal(cruiseRetryOptions(env, replaced).canRetry, true);
+  const next = JSON.parse(await prepareCruiseRetry(env, "fixture", replaced, "retry"));
+  assert.deepEqual(next.parts[1], finale);
+  assert.equal(next.parts[0].attempt, 3);
+  assert.equal(new URL(JSON.parse(next.parts[0].body).input.reference_video[0]).pathname, currentCruiseClipPath("opening"));
 });

@@ -1,7 +1,7 @@
 import type { AppEnv } from "./env";
-import { resolveMedia } from "./media";
-import { classifyInputFailure, ProviderError, providerFailureMessages, providerRequest, publicHttpsUrl, type ProviderFailure, type ProviderTask } from "./seeapi";
-import { resolveCruiseAssets } from "./template-assets";
+import { MediaError, resolveMedia } from "./media";
+import { ProviderError, providerFailure, providerFailureMessages, providerRequest, publicHttpsUrl, type ProviderFailure, type ProviderTask } from "./seeapi";
+import { cruisePauseMessage, currentCruiseClipPath, isCruiseClipPaused, resolveCruiseAssets } from "./template-assets";
 import { scenePrompts } from "./templates";
 import { assembleCruiseVideo } from "./cruise-video";
 import { storeProviderVideo } from "./result-video";
@@ -45,6 +45,7 @@ async function makeBodies(env: AppEnv, user: string, photos: Portraits, resoluti
 }
 
 export async function createCruisePlan(env: AppEnv, user: string, portraits: Portraits, resolution: string): Promise<string> {
+  if (scenes.some(scene => isCruiseClipPaused(env, scene))) throw new MediaError(503, "TEMPLATE_PAUSED", cruisePauseMessage);
   const bodies = await makeBodies(env, user, portraits, resolution);
   const plan: Plan = { portraits, resolution, retries: [], parts: scenes.map((scene, index) => ({
     scene, attempt: 1, body: bodies[index], status: "queued", credits: {}, previous: [],
@@ -56,13 +57,42 @@ export function hasRetried(body: string, retryId: string): boolean {
   return (JSON.parse(body) as Plan).retries.includes(retryId);
 }
 
-export function retryUsesCredits(body: string): boolean {
-  return (JSON.parse(body) as Plan).parts.some(part => !part.result);
+function rejectedClipWasReplaced(part: Part): boolean {
+  try {
+    const url = new URL(JSON.parse(part.body).input.reference_video[0]);
+    return url.pathname !== currentCruiseClipPath(part.scene);
+  } catch {
+    return false;
+  }
+}
+
+function retryBlock(env: AppEnv, parts: Part[]) {
+  const missing = parts.filter(part => !part.result);
+  if (missing.some(part => part.failure === "template_video_policy" && !rejectedClipWasReplaced(part))) {
+    return new MediaError(503, "TEMPLATE_PAUSED", providerFailureMessages.template_video_policy);
+  }
+  if (missing.some(part => isCruiseClipPaused(env, part.scene))) {
+    return new MediaError(503, "TEMPLATE_PAUSED", cruisePauseMessage);
+  }
+  for (const { failure } of missing) {
+    if (failure === "photo_policy" || failure === "content_policy") {
+      return new MediaError(422, "CONTENT_POLICY_VIOLATION", providerFailureMessages[failure]);
+    }
+  }
+}
+
+export function cruiseRetryOptions(env: AppEnv, body: string) {
+  const { parts } = JSON.parse(body) as Plan;
+  const block = retryBlock(env, parts);
+  if (block) return { canRetry: false, templatePaused: block.code === "TEMPLATE_PAUSED", error: block.message };
+  return { canRetry: true, retryUsesCredits: parts.some(part => !part.result) };
 }
 
 // Only an explicit, authenticated retry allocates a new provider idempotency key.
 export async function prepareCruiseRetry(env: AppEnv, user: string, body: string, retryId: string): Promise<string> {
   const plan: Plan = JSON.parse(body);
+  const block = retryBlock(env, plan.parts);
+  if (block) throw block;
   plan.retries.push(retryId);
   plan.assemblyFailures = 0;
   if (plan.parts.every(part => part.result)) return JSON.stringify(plan);
@@ -99,9 +129,18 @@ export async function advanceCruiseJob(env: AppEnv, job: LeasedJob) {
         total(plan.parts, "refunded_credits"), now, new Date(Date.now()+120_000).toISOString(), job.id, job.lease_id).run();
     return written.meta.changes === 1;
   }
+  // Check both queued scenes before submitting either. Already accepted tasks can still be polled and saved.
+  for (const part of plan.parts) {
+    if (unsubmitted(part) && isCruiseClipPaused(env, part.scene)) part.status = "failed";
+  }
   for (const part of plan.parts) {
     if (part.result || failures.has(part.status)) continue;
-    if (unsubmitted(part) && plan.parts.some(p => failures.has(p.status))) continue;
+    if (unsubmitted(part) && plan.parts.some(p => failures.has(p.status) ||
+      p.status === "submission_unknown" && !p.taskId && isCruiseClipPaused(env, p.scene))) continue;
+    if (part.status === "submission_unknown" && !part.taskId && isCruiseClipPaused(env, part.scene)) {
+      error = cruisePauseMessage;
+      continue;
+    }
     const key = `results/${job.user_id}/${job.id}/${part.scene}-${part.attempt}.mp4`;
     if (part.status === "succeeded" && await env.MEDIA.head(key)) {
       part.result = key;
@@ -128,7 +167,7 @@ export async function advanceCruiseJob(env: AppEnv, job: LeasedJob) {
     }
     part.taskId = task.id;
     part.status = task.status;
-    if (failures.has(part.status)) part.failure = classifyInputFailure(task.error_code, task.error_message);
+    if (failures.has(part.status)) part.failure = providerFailure(task);
     rememberCredits(part, task);
     if (!await checkpoint()) return;
     if (task.status === "succeeded") {
@@ -161,7 +200,7 @@ export async function advanceCruiseJob(env: AppEnv, job: LeasedJob) {
   const failed = plan.parts.some(p => failures.has(p.status));
   if (failed && plan.parts.every(p => p.result || failures.has(p.status) || unsubmitted(p))) {
     const reasons = plan.parts.flatMap(p => p.failure ? [providerFailureMessages[p.failure]] : []);
-    error = [...new Set(reasons)].join(" ") || "The video service could not complete the generation. You can retry the unfinished part.";
+    error = retryBlock(env, plan.parts)?.message ?? ([...new Set(reasons)].join(" ") || "The video service could not complete the generation. You can retry the unfinished part.");
     await checkpoint("failed");
     return;
   }

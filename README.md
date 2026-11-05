@@ -61,6 +61,8 @@ SEEAPI_API_KEY=填写自己的完整Key
 
 固定素材保存在私有 R2 的 `templates/24k-magic/v3/` 目录。两段 960×720 参考片分别为 `720p/01-deck-dance.mp4` 和 `720p/02-reaction-and-duet.mp4`，连续原声为 `reference-audio.m4a`。该输入尺寸符合供应商每帧至少 407,696 像素的要求，与用户选择的成片清晰度独立。旧版参考片的对象保留至已签发的链接到期。服务端在送单前检查三件素材，为供应商签发每段视频单独的限时读取地址。模板和任务的浏览器响应只提供用户所需的字段。音轨在 Worker 内直接读取。
 
+生产配置 `CRUISE_PAUSED_CLIP_KEY` 指向因真人审核被拦截的开场参考片。它暂停新任务，以及需要再次提交该片段的重试。已提交的片段仍可查询和保存，两段都已保存的任务仍可拼接。保留原文件，确认 SeeAPI 接受授权素材的方式后，再发布已获批的输入版本。
+
 - `TEMPLATE_DEBUG_EMAILS` 指定获准调试的 Google 邮箱。localhost 允许已登录开发者。
 - `MEDIA_PUBLIC_BASE_URL` 应指向提供素材读取服务的同一 Worker 和存储环境。线上同域部署可以省略。本地端到端运行可通过 HTTPS 隧道将该 Worker 提供给供应商，同时在本地 R2 放入同名素材。
 - 照片为 JPEG/PNG/WebP，每张最大 10 MiB；Images 解码、缩放为最长边 2048 的静态 WebP，并移除元数据。

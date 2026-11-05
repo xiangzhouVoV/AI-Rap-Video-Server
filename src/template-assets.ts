@@ -19,6 +19,16 @@ const lifetimeSeconds = 24 * 60 * 60;
 const encoder = new TextEncoder();
 type Clip = keyof typeof cruiseClipKeys;
 
+export const cruisePauseMessage = "Generation is paused for this template pending approval. You can check again later.";
+
+export function isCruiseClipPaused(env: AppEnv, scene: Clip) {
+  return env.CRUISE_PAUSED_CLIP_KEY === cruiseClipKeys[scene];
+}
+
+export function currentCruiseClipPath(scene: Clip) {
+  return `${fixedMediaPath}${revision}/${scene}`;
+}
+
 function signingKey(env: AppEnv) {
   if (!env.BETTER_AUTH_SECRET || env.BETTER_AUTH_SECRET.length < 32) throw new Error("Missing signing key");
   return crypto.subtle.importKey("raw", encoder.encode(env.BETTER_AUTH_SECRET),
@@ -37,7 +47,7 @@ export async function resolveCruiseAssets(env: AppEnv): Promise<{ opening: strin
     const key = await signingKey(env);
     const expires = String(Math.floor(Date.now() / 1000) + lifetimeSeconds);
     async function providerUrl(clip: Clip) {
-      const url = new URL(`${fixedMediaPath}${revision}/${clip}`, origin);
+      const url = new URL(currentCruiseClipPath(clip), origin);
       const bytes = await crypto.subtle.sign("HMAC", key, signatureInput(url.pathname, expires));
       url.searchParams.set("expires", expires);
       url.searchParams.set("signature", Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, "0")).join(""));

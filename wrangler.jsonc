@@ -30,7 +30,8 @@
   ],
   "vars": {
     "BETTER_AUTH_URL": "https://airaptovideo.app",
-    "SEEAPI_API_BASE_URL": "https://api.seeapi.com"
+    "SEEAPI_API_BASE_URL": "https://api.seeapi.com",
+    "CRUISE_PAUSED_CLIP_KEY": "templates/24k-magic/v3/720p/01-deck-dance.mp4"
   },
   "d1_databases": [{
     "binding": "DB",
