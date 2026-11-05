@@ -263,7 +263,7 @@ describe("authentication against local D1", { concurrency: false }, () => {
 
   it("pins the full-length trial and submits its finale only after saving the opening", async (t) => {
     const { user, cookie } = await createSession();
-    const bindings = { ...(env as AppEnv), CRUISE_PAUSED_CLIP_KEY: "", CRUISE_TRIAL_CAST_VERIFIED: "", TEMPLATE_DEBUG_EMAILS: user.email,
+    const bindings = { ...(env as AppEnv), CRUISE_PAUSED_CLIP_KEY: "", CRUISE_TRIAL_ENABLED: "", TEMPLATE_DEBUG_EMAILS: user.email,
       SEEAPI_API_KEY: "test-only", SEEAPI_API_BASE_URL: "https://provider.example.test", MEDIA_PUBLIC_BASE_URL: origin };
     const headers = { Origin: origin, Cookie: cookie, "Content-Type": "application/json" };
     const submit = (body: object, suffix = "") => request("/api/template-generations" + suffix, {
@@ -318,7 +318,11 @@ describe("authentication against local D1", { concurrency: false }, () => {
     assert.equal(paused.status, 503);
     assert.equal((await paused.json() as {error: {code: string}}).error.code, "TEMPLATE_PAUSED");
     assert.deepEqual(submitted, []);
-    bindings.CRUISE_TRIAL_CAST_VERIFIED = "true";
+    bindings.CRUISE_TRIAL_ENABLED = "true";
+    const enabled = await request("/api/templates/24k-magic", { headers }, bindings);
+    assert.deepEqual((await enabled.json() as typeof configBody).capabilities, {
+      generationEnabled: true, uploadsPublic: true, templatePaused: false,
+    });
     const first = await submit(body);
     assert.equal(first.status, 202);
     const { job } = await first.json() as { job: { id: string; templateVersion: number } };
