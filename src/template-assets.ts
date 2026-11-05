@@ -14,6 +14,7 @@ const v3ClipKeys = clipKeys(prefix + "/v3/720p");
 export const cruiseClipKeys = { opening: prefix + "/v4/opening.mp4", finale: prefix + "/v4/finale.mp4" };
 export const cruiseAudioKey = prefix + "/v4/reference-audio.m4a";
 export const cruiseTemplateVersion = 4;
+export const cruiseTrialVersion = 5;
 
 export const fixedMediaPath = "/api/template-media/fixed/24k-magic";
 const lifetimeSeconds = 24 * 60 * 60;
@@ -27,10 +28,15 @@ const specifications = {
     clipKeys: cruiseClipKeys, audioKey: cruiseAudioKey, path: fixedMediaPath + "/v4",
     aspectRatio: "16:9", cut: 302 / 30, duration: 605 / 30, providerSeconds: 11,
   },
+  5: {
+    clipKeys: { opening: prefix + "/v5/opening.mp4", finale: prefix + "/v5/finale.mp4" },
+    audioKey: prefix + "/v5/reference-audio.m4a", path: fixedMediaPath + "/v5",
+    aspectRatio: "16:9", cut: 356 / 24, duration: 713 / 24, providerSeconds: 15,
+  },
 };
 
 export function cruiseSpec(version: number) {
-  if (version !== 3 && version !== 4) throw new Error("Unknown template version");
+  if (version !== 3 && version !== 4 && version !== 5) throw new Error("Unknown template version");
   return specifications[version];
 }
 
@@ -81,21 +87,24 @@ export async function resolveCruiseAssets(env: AppEnv, version = cruiseTemplateV
 }
 
 export const fixedMediaRoutes = new Hono<AppBindings>();
-fixedMediaRoutes.on(["GET", "HEAD"], ["/v3/:clip", "/v3/720p/:clip", "/v4/:clip"], async (c) => {
+// Retain the revisionless v3 URL for provider jobs issued before the resolution upgrade.
+const keysByPath = new Map([
+  [fixedMediaPath + "/v3", legacyClipKeys] as const,
+  ...Object.values(specifications).map(spec => [spec.path, spec.clipKeys] as const),
+]);
+fixedMediaRoutes.on(["GET", "HEAD"], ["/:version/:clip", "/v3/720p/:clip"], async (c) => {
   const clip = c.req.param("clip");
+  const keys = keysByPath.get(c.req.path.slice(0, c.req.path.lastIndexOf("/")));
   const expires = c.req.query("expires") ?? "";
   const signature = c.req.query("signature") ?? "";
   const now = Math.floor(Date.now() / 1000);
-  if ((clip !== "opening" && clip !== "finale") || !/^\d{10}$/.test(expires) ||
+  if (!keys || (clip !== "opening" && clip !== "finale") || !/^\d{10}$/.test(expires) ||
     Number(expires) <= now || !/^[0-9a-f]{64}$/.test(signature)) return c.notFound();
 
   const key = await signingKey(c.env);
   const mac = Uint8Array.from(signature.match(/../g)!, byte => Number.parseInt(byte, 16));
   if (!await crypto.subtle.verify("HMAC", key, mac, signatureInput(c.req.path, expires))) return c.notFound();
 
-  // Pending provider tasks may still read a previously issued, revisionless URL.
-  const keys = c.req.path === `${fixedMediaPath}/v3/${clip}` ? legacyClipKeys
-    : c.req.path === currentCruiseClipPath(clip, 3) ? v3ClipKeys : cruiseClipKeys;
   const objectKey = keys[clip];
   const metadata = await c.env.MEDIA.head(objectKey);
   if (!metadata) return c.notFound();

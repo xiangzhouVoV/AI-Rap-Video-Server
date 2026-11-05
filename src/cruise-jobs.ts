@@ -1,8 +1,8 @@
 import type { AppEnv } from "./env";
 import { MediaError, resolveMedia } from "./media";
 import { ProviderError, providerFailure, providerFailureMessages, providerRequest, publicHttpsUrl, type ProviderFailure, type ProviderTask } from "./seeapi";
-import { cruisePauseMessage, cruiseSpec, cruiseTemplateVersion, currentCruiseClipPath, isCruiseClipPaused, resolveCruiseAssets } from "./template-assets";
-import { legacyScenePrompts, scenePrompts } from "./templates";
+import { cruisePauseMessage, cruiseSpec, cruiseTrialVersion, currentCruiseClipPath, isCruiseClipPaused, resolveCruiseAssets } from "./template-assets";
+import { legacyScenePrompts, scenePrompts, trialScenePrompts } from "./templates";
 import { assembleCruiseVideo } from "./cruise-video";
 import { storeProviderVideo } from "./result-video";
 
@@ -37,7 +37,7 @@ async function makeBodies(env: AppEnv, user: string, photos: Portraits, resoluti
   ]);
   const references = await resolveCruiseAssets(env, version);
   const { aspectRatio, providerSeconds } = cruiseSpec(version);
-  const prompts = version === 3 ? legacyScenePrompts : scenePrompts;
+  const prompts = version === cruiseTrialVersion ? trialScenePrompts : version === 3 ? legacyScenePrompts : scenePrompts;
   return scenes.map((scene) => JSON.stringify({
     model: "seedance-2", endpoint: "reference-to-video", provider: "seeapi", input: {
       prompt: prompts[scene], reference_images: [dancer, partner], reference_video: [references[scene]],
@@ -46,9 +46,9 @@ async function makeBodies(env: AppEnv, user: string, photos: Portraits, resoluti
   }));
 }
 
-export async function createCruisePlan(env: AppEnv, user: string, portraits: Portraits, resolution: string): Promise<string> {
-  if (scenes.some(scene => isCruiseClipPaused(env, scene))) throw new MediaError(503, "TEMPLATE_PAUSED", cruisePauseMessage);
-  const bodies = await makeBodies(env, user, portraits, resolution, cruiseTemplateVersion);
+export async function createCruisePlan(env: AppEnv, user: string, portraits: Portraits, resolution: string, version: number): Promise<string> {
+  if (scenes.some(scene => isCruiseClipPaused(env, scene, version))) throw new MediaError(503, "TEMPLATE_PAUSED", cruisePauseMessage);
+  const bodies = await makeBodies(env, user, portraits, resolution, version);
   const plan: Plan = { portraits, resolution, retries: [], parts: scenes.map((scene, index) => ({
     scene, attempt: 1, body: bodies[index], status: "queued", credits: {}, previous: [],
   })) };
@@ -99,10 +99,14 @@ export async function prepareCruiseRetry(env: AppEnv, user: string, body: string
   plan.assemblyFailures = 0;
   if (plan.parts.every(part => part.result)) return JSON.stringify(plan);
   const bodies = await makeBodies(env, user, plan.portraits, plan.resolution, version);
-  plan.parts = plan.parts.map((part, index) => failures.has(part.status) || unsubmitted(part) ? {
-    scene: part.scene, body: bodies[index], attempt: part.attempt + 1, status: "queued", credits: {},
-    previous: [...part.previous, { ...part.credits, failure: part.failure }],
-  } : part);
+  plan.parts = plan.parts.map((part, index) => {
+    if (version === cruiseTrialVersion && unsubmitted(part)) return { ...part, body: bodies[index] };
+    if (!failures.has(part.status) && !unsubmitted(part)) return part;
+    return {
+      scene: part.scene, body: bodies[index], attempt: part.attempt + 1, status: "queued", credits: {},
+      previous: [...part.previous, { ...part.credits, failure: part.failure }],
+    };
+  });
   return JSON.stringify(plan);
 }
 
@@ -138,6 +142,8 @@ export async function advanceCruiseJob(env: AppEnv, job: LeasedJob) {
   }
   for (const part of plan.parts) {
     if (part.result || failures.has(part.status)) continue;
+    // In the trial a rejected or pending opening must never trigger a second paid submission.
+    if (version === cruiseTrialVersion && part.scene === "finale" && !part.taskId && !plan.parts[0].result) continue;
     if (unsubmitted(part) && plan.parts.some(p => failures.has(p.status) ||
       p.status === "submission_unknown" && !p.taskId && isCruiseClipPaused(env, p.scene, version))) continue;
     if (part.status === "submission_unknown" && !part.taskId && isCruiseClipPaused(env, part.scene, version)) {

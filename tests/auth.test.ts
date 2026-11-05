@@ -9,7 +9,7 @@ import { createAuth, type AuthEnv } from "../src/auth";
 import { app } from "../src/index";
 import { reconcileCruiseJobs } from "../src/generations";
 import type { AppEnv } from "../src/env";
-import { cruiseAudioKey, cruiseClipKeys, resolveCruiseAssets } from "../src/template-assets";
+import { cruiseAudioKey, cruiseClipKeys, cruiseSpec, resolveCruiseAssets } from "../src/template-assets";
 
 const origin = "https://auth.example.test";
 let env: AuthEnv;
@@ -258,6 +258,77 @@ describe("authentication against local D1", { concurrency: false }, () => {
       assert.equal((await submit(v2Request)).status, 200);
       assert.equal((await submit({...v2Request, partnerPhotoUrl: "https://assets.example.test/changed.jpg"})).status, 409);
     }
+  });
+
+  it("pins the full-length trial and submits its finale only after saving the opening", async (t) => {
+    const { user, cookie } = await createSession();
+    const bindings = { ...(env as AppEnv), CRUISE_PAUSED_CLIP_KEY: "", TEMPLATE_DEBUG_EMAILS: user.email,
+      SEEAPI_API_KEY: "test-only", SEEAPI_API_BASE_URL: "https://provider.example.test", MEDIA_PUBLIC_BASE_URL: origin };
+    const headers = { Origin: origin, Cookie: cookie, "Content-Type": "application/json" };
+    const submit = (body: object, suffix = "") => request("/api/template-generations" + suffix, {
+      method: "POST", headers, body: JSON.stringify(body),
+    }, bindings);
+    const { clipKeys, audioKey } = cruiseSpec(5);
+    for (const key of [clipKeys.opening, clipKeys.finale, audioKey]) await bindings.MEDIA.put(key, "trial asset");
+    const config = await request("/api/templates/24k-magic?version=5", { headers }, bindings);
+    assert.deepEqual((await config.json() as {template: object}).template, {
+      id: "24k-magic", name: "24K Magic Cruise Dance", version: 5, duration: 713 / 24, aspectRatio: "16:9", resolution: "720p",
+    });
+    const signed = new URL((await resolveCruiseAssets(bindings, 5)).opening);
+    assert.equal(await (await request(signed.pathname + signed.search)).text(), "trial asset");
+    assert.equal((await request(signed.pathname.replace("/v5/", "/v4/") + signed.search)).status, 404);
+    const photos = { templateId: "24k-magic", templateVersion: 5, photoUrl: "https://assets.example.test/a.png",
+      partnerPhotoUrl: "https://assets.example.test/b.png" };
+    const providerUrl = "https://provider.example.test/v1/generations";
+    const videoUrl = "https://assets.example.test/trial.mp4";
+    const submitted: string[] = [];
+    let blocked = true;
+    let canSave = false;
+    const realFetch = globalThis.fetch;
+    t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url === videoUrl) return canSave ? new Response(new Uint8Array([1, 2])) : new Response(null, { status: 503 });
+      if (url === providerUrl && init?.method === "POST") {
+        const key = new Headers(init.headers).get("Idempotency-Key")!;
+        const { input: payload } = JSON.parse(String(init.body));
+        assert.equal(payload.duration_seconds, 15);
+        assert.equal(payload.nsfw_checker, true);
+        assert.equal(new URL(payload.reference_video[0]).pathname, "/api/template-media/fixed/24k-magic/v5/" + (key.endsWith("opening-1") ? "opening" : "finale"));
+        submitted.push(key);
+        return Response.json({ id: key, status: "processing" });
+      }
+      if (url.startsWith(providerUrl + "/")) return Response.json(blocked
+        ? { id: url.split("/").pop(), status: "failed", consumed_credits: 0, error: { code: "CONTENT_POLICY_VIOLATION", message: "The input video was blocked because it may contain a real person." } }
+        : { id: url.split("/").pop(), status: "succeeded", result: { assets: [{ type: "video", url: videoUrl }] } });
+      return realFetch(input, init);
+    });
+    async function advance(id: string) {
+      await env.DB.prepare("UPDATE template_generation SET updated_at=? WHERE id=?").bind("2001-01-01T00:00:00.000Z", id).run();
+      await reconcileCruiseJobs(bindings);
+      const response = await request("/api/template-generations/" + id, { headers }, bindings);
+      return (await response.json() as { job: { status: string; canRetry: boolean; consumedCredits: number } }).job;
+    }
+    const body = { ...photos, requestId: crypto.randomUUID() };
+    const first = await submit(body);
+    assert.equal(first.status, 202);
+    const { job } = await first.json() as { job: { id: string; templateVersion: number } };
+    assert.equal(job.templateVersion, 5);
+    assert.equal((await submit({ ...body, templateVersion: 4 })).status, 409);
+    const failed = await advance(job.id);
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.canRetry, false);
+    assert.equal(failed.consumedCredits, 0);
+    assert.equal((await submit({ retryId: crypto.randomUUID() }, "/" + job.id + "/retry")).status, 503);
+    assert.deepEqual(submitted, [`template-${job.id}-opening-1`]);
+
+    blocked = false;
+    const accepted = await submit({ ...photos, requestId: crypto.randomUUID() });
+    const secondId = (await accepted.json() as { job: { id: string } }).job.id;
+    await advance(secondId);
+    assert.equal(submitted.length, 2, "an opening still being downloaded must not trigger the finale");
+    canSave = true;
+    await advance(secondId);
+    assert.deepEqual(submitted.slice(1), [`template-${secondId}-opening-1`, `template-${secondId}-finale-1`]);
   });
 
   it("rejects a forged session cookie", async () => {

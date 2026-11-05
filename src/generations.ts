@@ -5,7 +5,7 @@ import { ProviderError, providerRequest, type ProviderTask } from "./seeapi";
 import { cruisePromptV2, cruisePromptV1 } from "./templates";
 
 import { createCruisePlan, advanceCruiseJob, hasRetried, prepareCruiseRetry, cruiseRetryOptions } from "./cruise-jobs";
-import { cruiseTemplateVersion } from "./template-assets";
+import { cruiseTemplateVersion, cruiseTrialVersion } from "./template-assets";
 import { storeProviderVideo } from "./result-video";
 
 type Job = {
@@ -30,7 +30,7 @@ generationRoutes.post("/", async (c) => {
   }
   const userId = c.get("userId");
   const existing = await findJob(c.env, userId, body.requestId);
-  const expectedVersion = existing?.template_version ?? cruiseTemplateVersion;
+  const expectedVersion = existing?.template_version ?? (body.templateVersion === cruiseTrialVersion ? cruiseTrialVersion : cruiseTemplateVersion);
   if (expectedVersion >= 4 ? body.templateVersion !== expectedVersion
     : body.templateVersion != null && body.templateVersion !== expectedVersion) {
     return c.json({ error: { code: "TEMPLATE_UPDATED", message: "This template has changed. Reload the page before starting a video." } }, 409);
@@ -67,7 +67,7 @@ generationRoutes.post("/", async (c) => {
   }
   let providerBody: string;
   try {
-    providerBody = await createCruisePlan(c.env, userId, portraits, resolution as string);
+    providerBody = await createCruisePlan(c.env, userId, portraits, resolution as string, expectedVersion);
   } catch (error) {
     if (error instanceof MediaError) return c.json({ error: { code: error.code, message: error.message } }, error.status);
     return c.json({ error: { code: "INVALID_MEDIA", message: error instanceof Error ? error.message : "Check both photos." } }, 400);
@@ -79,7 +79,7 @@ generationRoutes.post("/", async (c) => {
     SELECT ?,?,?,?,?,?,?,'submitting',?,?,?,?
     WHERE (SELECT COUNT(*) FROM template_generation WHERE user_id=? AND status IN ('submitting','submission_unknown','processing')) < 2
     ON CONFLICT(user_id,request_id) DO NOTHING`)
-    .bind(id, userId, body.requestId, hash, "24k-magic", cruiseTemplateVersion, providerBody, now, now, id, new Date(Date.now() + 120_000).toISOString(), userId).run();
+    .bind(id, userId, body.requestId, hash, "24k-magic", expectedVersion, providerBody, now, now, id, new Date(Date.now() + 120_000).toISOString(), userId).run();
   if (!inserted.meta.changes) {
     const raced = await findJob(c.env, userId, body.requestId);
     if (raced && raced.request_hash === hash) return c.json({ job: publicJob(c.env, raced) });
@@ -98,7 +98,7 @@ generationRoutes.post("/:id/retry", async (c) => {
   const job = await findJob(c.env, c.get("userId"), c.req.param("id"));
   if (!job) return c.json({ error: { code: "NOT_FOUND", message: "This task was not found in your account." } }, 404);
   if (job.template_version >= 3 && hasRetried(job.provider_body, retryId)) return c.json({ job: publicJob(c.env, job) });
-  if (job.template_version < 3 || job.template_version > cruiseTemplateVersion || job.status !== "failed") {
+  if (job.template_version < 3 || job.template_version > cruiseTrialVersion || job.status !== "failed") {
     return c.json({ error: { code: "CANNOT_RETRY", message: "This generation has no failed part to retry." } }, 409);
   }
   let plan: string;
@@ -232,7 +232,7 @@ async function processClaimedCruiseJob(env: AppEnv, job: Job): Promise<Job> {
 
 export async function reconcileCruiseJobs(env: AppEnv) {
   const now = new Date().toISOString();
-  const jobs = await env.DB.prepare(`SELECT * FROM template_generation WHERE template_version IN (3,4)
+  const jobs = await env.DB.prepare(`SELECT * FROM template_generation WHERE template_version IN (3,4,5)
     AND status IN ('submitting','submission_unknown','processing') AND (lease_until IS NULL OR lease_until<?)
     AND updated_at<? ORDER BY updated_at LIMIT 5`).bind(now, new Date(Date.now()-8000).toISOString()).all<Job>();
   for (const job of jobs.results) {
