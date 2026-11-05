@@ -144,7 +144,11 @@ describe("authentication against local D1", { concurrency: false }, () => {
         const key = new Headers(init.headers).get("Idempotency-Key")!;
         submitted.push({body: String(init.body), key});
         if (key.endsWith("finale-1") && submitted.length === 2) return new Response(null, { status: 502 });
-        return Response.json({ generation: { id: key, status: key.endsWith("finale-1") ? "failed" : "processing", consumed_credits: 1 } });
+        return Response.json({ generation: { id: key, consumed_credits: 1, ...(key.endsWith("finale-1") ? {
+          status: "failed", error_code: "INVALID_INPUT",
+          error_message: "The input video must contain at least 407696 pixels per frame (width multiplied by height). " +
+            "Use a higher resolution input video and try again. https://private.example.test/video?secret=test-private-error",
+        } : { status: "processing" }) } });
       }
       if (url.startsWith(providerUrl + "/")) {
         if (url.endsWith("opening-1") && openingPolls++ === 0) {
@@ -167,7 +171,7 @@ describe("authentication against local D1", { concurrency: false }, () => {
     for (const key of [cruiseClipKeys.opening, cruiseClipKeys.finale, cruiseAudioKey]) await bindings.MEDIA.put(key, "fixture");
     const response = await submit(body);
     assert.equal(response.status, 202);
-    type Public = { job: { id: string; status: string; canRetry: boolean; retryUsesCredits?: boolean; consumedCredits: number; videoUrl: string | null } };
+    type Public = { job: { id: string; status: string; canRetry: boolean; retryUsesCredits?: boolean; error: string | null; consumedCredits: number; videoUrl: string | null } };
     const { job } = await response.json() as Public;
     assert.equal(job.status, "submission_unknown");
     assert.equal(job.videoUrl, null);
@@ -192,6 +196,7 @@ describe("authentication against local D1", { concurrency: false }, () => {
     const partial = await advance();
     assert.equal(partial.status, "failed");
     assert.equal(partial.canRetry, true);
+    assert.equal(partial.error, "The template's video resolution was too low for generation. You can keep both photos.");
     assert.equal(partial.consumedCredits, 4);
     assert.equal(partial.retryUsesCredits, true);
     assert.deepEqual(submitted[1], submitted[2], "uncertain submission must replay identical provider request");
@@ -201,6 +206,9 @@ describe("authentication against local D1", { concurrency: false }, () => {
     assert.equal((await retry()).status, 200);
     assert.equal(submitted.length, 4);
     assert.ok(submitted[3].key.endsWith("finale-2"));
+    const stored = await env.DB.prepare("SELECT provider_body FROM template_generation WHERE id=?").bind(job.id).first<string>("provider_body");
+    assert.ok(stored && !stored.includes("test-private-error"));
+    assert.deepEqual(JSON.parse(stored).parts[1].previous, [{ consumed_credits: 1, failure: "template_video_resolution" }]);
     // These dummy media bytes cannot be assembled. Saving both parts alone must not publish the job.
     assert.equal((await advance()).status, "processing");
     assert.equal((await lookup()).videoUrl, null);
@@ -432,6 +440,18 @@ describe("authentication against local D1", { concurrency: false }, () => {
 
     const signed = await resolveCruiseAssets(bindings);
     const clip = new URL(signed.opening);
+    assert.equal(clip.pathname, "/api/template-media/fixed/24k-magic/v3/720p/opening");
+    const oldClip = new URL(clip.href);
+    oldClip.pathname = "/api/template-media/fixed/24k-magic/v3/opening";
+    assert.equal((await request(oldClip.pathname + clip.search)).status, 404);
+    await bindings.MEDIA.put("templates/24k-magic/v3/01-deck-dance.mp4", "old opening");
+    const oldSignature = createHmac("sha256", bindings.BETTER_AUTH_SECRET)
+      .update(`provider-read\n${oldClip.pathname}\n${oldClip.searchParams.get("expires")}`).digest("hex");
+    oldClip.searchParams.set("signature", oldSignature);
+    const legacy = await request(oldClip.pathname + oldClip.search);
+    assert.equal(legacy.status, 200);
+    assert.equal(await legacy.text(), "old opening");
+    assert.equal((await request(clip.pathname + oldClip.search)).status, 404);
     const response = await request(clip.pathname + clip.search, { headers: { Range: "bytes=2-4" } });
     assert.equal(response.status, 206);
     assert.equal(response.headers.get("content-range"), "bytes 2-4/7");
@@ -448,5 +468,6 @@ describe("authentication against local D1", { concurrency: false }, () => {
     const expiry = Number(clip.searchParams.get("expires")) * 1000;
     t.mock.method(Date, "now", () => expiry);
     assert.equal((await request(clip.pathname + clip.search)).status, 404);
+    assert.equal((await request(oldClip.pathname + oldClip.search)).status, 404);
   });
 });

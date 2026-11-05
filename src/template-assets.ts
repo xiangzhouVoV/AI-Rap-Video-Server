@@ -3,10 +3,15 @@ import type { AppBindings, AppEnv } from "./env";
 import { MediaError, publicOrigin, serveMedia } from "./media";
 
 const prefix = "templates/24k-magic/v3";
-export const cruiseClipKeys = {
-  opening: `${prefix}/01-deck-dance.mp4`,
-  finale: `${prefix}/02-reaction-and-duet.mp4`,
-};
+function clipKeys(directory: string) {
+  return {
+    opening: `${directory}/01-deck-dance.mp4`,
+    finale: `${directory}/02-reaction-and-duet.mp4`,
+  };
+}
+const revision = "/720p";
+const legacyClipKeys = clipKeys(prefix);
+export const cruiseClipKeys = clipKeys(prefix + revision);
 export const cruiseAudioKey = `${prefix}/reference-audio.m4a`;
 
 export const fixedMediaPath = "/api/template-media/fixed/24k-magic/v3";
@@ -20,8 +25,8 @@ function signingKey(env: AppEnv) {
     { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
 }
 
-function signatureInput(clip: Clip, expires: string) {
-  return encoder.encode(`provider-read\n${fixedMediaPath}/${clip}\n${expires}`);
+function signatureInput(path: string, expires: string) {
+  return encoder.encode(`provider-read\n${path}\n${expires}`);
 }
 
 export async function resolveCruiseAssets(env: AppEnv): Promise<{ opening: string; finale: string }> {
@@ -32,8 +37,8 @@ export async function resolveCruiseAssets(env: AppEnv): Promise<{ opening: strin
     const key = await signingKey(env);
     const expires = String(Math.floor(Date.now() / 1000) + lifetimeSeconds);
     async function providerUrl(clip: Clip) {
-      const bytes = await crypto.subtle.sign("HMAC", key, signatureInput(clip, expires));
-      const url = new URL(`${fixedMediaPath}/${clip}`, origin);
+      const url = new URL(`${fixedMediaPath}${revision}/${clip}`, origin);
+      const bytes = await crypto.subtle.sign("HMAC", key, signatureInput(url.pathname, expires));
       url.searchParams.set("expires", expires);
       url.searchParams.set("signature", Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, "0")).join(""));
       return url.href;
@@ -46,7 +51,7 @@ export async function resolveCruiseAssets(env: AppEnv): Promise<{ opening: strin
 }
 
 export const fixedMediaRoutes = new Hono<AppBindings>();
-fixedMediaRoutes.on(["GET", "HEAD"], "/:clip", async (c) => {
+fixedMediaRoutes.on(["GET", "HEAD"], ["/:clip", `${revision}/:clip`], async (c) => {
   const clip = c.req.param("clip");
   const expires = c.req.query("expires") ?? "";
   const signature = c.req.query("signature") ?? "";
@@ -56,9 +61,11 @@ fixedMediaRoutes.on(["GET", "HEAD"], "/:clip", async (c) => {
 
   const key = await signingKey(c.env);
   const mac = Uint8Array.from(signature.match(/../g)!, byte => Number.parseInt(byte, 16));
-  if (!await crypto.subtle.verify("HMAC", key, mac, signatureInput(clip, expires))) return c.notFound();
+  if (!await crypto.subtle.verify("HMAC", key, mac, signatureInput(c.req.path, expires))) return c.notFound();
 
-  const objectKey = cruiseClipKeys[clip];
+  // Pending provider tasks may still read a previously issued, revisionless URL.
+  const keys = c.req.path === `${fixedMediaPath}/${clip}` ? legacyClipKeys : cruiseClipKeys;
+  const objectKey = keys[clip];
   const metadata = await c.env.MEDIA.head(objectKey);
   if (!metadata) return c.notFound();
   return serveMedia(c, { object_key: objectKey, content_type: "video/mp4", byte_size: metadata.size });

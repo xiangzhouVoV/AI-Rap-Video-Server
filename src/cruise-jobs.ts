@@ -1,6 +1,6 @@
 import type { AppEnv } from "./env";
 import { resolveMedia } from "./media";
-import { ProviderError, providerRequest, publicHttpsUrl, type ProviderTask } from "./seeapi";
+import { classifyInputFailure, ProviderError, providerFailureMessages, providerRequest, publicHttpsUrl, type ProviderFailure, type ProviderTask } from "./seeapi";
 import { resolveCruiseAssets } from "./template-assets";
 import { scenePrompts } from "./templates";
 import { assembleCruiseVideo } from "./cruise-video";
@@ -11,7 +11,7 @@ type Scene = keyof typeof scenePrompts;
 type Credits = { estimated_credits?: number; consumed_credits?: number; refunded_credits?: number };
 type Part = {
   scene: Scene; attempt: number; body: string; status: string; taskId?: string; result?: string;
-  credits: Credits; previous: Credits[];
+  failure?: ProviderFailure; credits: Credits; previous: (Credits & { failure?: ProviderFailure })[];
 };
 type Plan = { portraits: Portraits; resolution: string; parts: Part[]; retries: string[]; assemblyFailures?: number };
 type LeasedJob = { id: string; user_id: string; provider_body: string; lease_id: string | null };
@@ -69,7 +69,7 @@ export async function prepareCruiseRetry(env: AppEnv, user: string, body: string
   const bodies = await makeBodies(env, user, plan.portraits, plan.resolution);
   plan.parts = plan.parts.map((part, index) => failures.has(part.status) || unsubmitted(part) ? {
     scene: part.scene, body: bodies[index], attempt: part.attempt + 1, status: "queued", credits: {},
-    previous: [...part.previous, part.credits],
+    previous: [...part.previous, { ...part.credits, failure: part.failure }],
   } : part);
   return JSON.stringify(plan);
 }
@@ -114,13 +114,21 @@ export async function advanceCruiseJob(env: AppEnv, job: LeasedJob) {
         ? await providerRequest(env, `/v1/generations/${encodeURIComponent(part.taskId)}`)
         : await providerRequest(env, "/v1/generations", { body: part.body, key: `template-${job.id}-${part.scene}-${part.attempt}` });
     } catch (cause) {
-      if (!part.taskId) part.status = cause instanceof ProviderError && !cause.uncertain ? "failed" : "submission_unknown";
+      if (!part.taskId) {
+        if (cause instanceof ProviderError && !cause.uncertain) {
+          part.status = "failed";
+          part.failure = cause.failure;
+        } else {
+          part.status = "submission_unknown";
+        }
+      }
       error = "The video service could not finish this step. Check this task for updates.";
       if (!await checkpoint()) return;
       continue;
     }
     part.taskId = task.id;
     part.status = task.status;
+    if (failures.has(part.status)) part.failure = classifyInputFailure(task.error_code, task.error_message);
     rememberCredits(part, task);
     if (!await checkpoint()) return;
     if (task.status === "succeeded") {
@@ -152,7 +160,8 @@ export async function advanceCruiseJob(env: AppEnv, job: LeasedJob) {
   // Keep polling any already submitted sibling after a failure so its outcome and charges are preserved.
   const failed = plan.parts.some(p => failures.has(p.status));
   if (failed && plan.parts.every(p => p.result || failures.has(p.status) || unsubmitted(p))) {
-    error = "The video service could not complete the generation. You can retry the unfinished part.";
+    const reasons = plan.parts.flatMap(p => p.failure ? [providerFailureMessages[p.failure]] : []);
+    error = [...new Set(reasons)].join(" ") || "The video service could not complete the generation. You can retry the unfinished part.";
     await checkpoint("failed");
     return;
   }
