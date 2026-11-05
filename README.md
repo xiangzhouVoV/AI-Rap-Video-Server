@@ -61,7 +61,7 @@ SEEAPI_API_KEY=填写自己的完整Key
 
 `GET /api/templates/24k-magic` 默认返回真人完整版 v5，也可显式指定 `?version=5`，提交时传数字 `templateVersion: 5`。该试用用真人原片和连续原声，包含开场双手托在下巴两侧的动作、甲板上的劈叉、白被中的搭档和结尾通风筒镜头。每段生成 15 秒，按 24 fps 在第 356 帧后拼接，共 713 帧（29.71 秒）。开场通过供应商审核并保存成功后才提交后段。
 
-固定素材保存在私有 R2 的 `templates/24k-magic/v4/` 和 `templates/24k-magic/v5/` 目录，每版各有 `opening.mp4`、`finale.mp4` 和 `reference-audio.m4a`。服务端检查该版本的三件素材，签发给供应商的短时视频地址仅对对应版本与片段有效。设置 `CRUISE_PAUSED_CLIP_KEY` 可按完整对象键暂停某段素材的付费生成。v5 上次生成保留了原演员。生产配置 `CRUISE_TRIAL_ENABLED=true` 允许已授权的调试账号付费复测。设为 `false` 或移除该变量即可再次暂停 v5 付费生成与重试。
+固定素材保存在私有 R2 的 `templates/24k-magic/v4/` 和 `templates/24k-magic/v5/` 目录，每版各有 `opening.mp4`、`finale.mp4` 和 `reference-audio.m4a`。服务端检查该版本的三件素材，签发给供应商的短时视频地址仅对对应版本与片段有效。设置 `CRUISE_PAUSED_CLIP_KEY` 可按完整对象键暂停某段素材的付费生成。生产配置 `CRUISE_TRIAL_ENABLED=false` 暂停 v5 新的付费生成与重试。已提交的片段仍可查询和保存。两段均已保存时仍可免费重试拼接。
 
 v3 任务按其原有 4:3 参考片、音轨与 26.554 秒时间线处理。v3 开场因真人审核暂停。已经提交的任务仍可查询和保存，已保存的两段仍可拼接。
 
